@@ -1,0 +1,42 @@
+name: oa_erp_application
+description: "OrangeApps ERP RFID Kiosk Application"
+publish_to: 'none'
+
+version: 1.0.1+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  http: ^1.6.0
+  window_manager: ^0.5.2
+  flutter_launcher_icons: ^0.14.2
+  flutter_riverpod: ^3.4.3
+  package_info_plus: ^10.2.2
+  sqlite3: ^3.7.1
+  sqlite3_flutter_libs: ^0.6.0+eol
+  path: ^1.9.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter_launcher_icons:
+  image_path: "assets/images/placeholder_logo.png"
+  windows:
+    generate: true
+    image_path: "assets/images/placeholder_logo.png"
+    icon_size: 256
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/
+    - assets/images/
+    - .env
