@@ -361,6 +361,305 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     return '$h:$m:$s $period';
   }
 
+  Widget _buildSsaManilaBackground() {
+    final localDb = ref.watch(localDbServiceProvider);
+    final cachedLocalPath = localDb.getCachedSchoolLogoPath();
+    final logoUrl = _dynamicLogoUrl ?? widget.networkLogoUrl ?? EnvConfig.schoolLogoUrl;
+
+    if (cachedLocalPath != null && File(cachedLocalPath).existsSync()) {
+      return Image.file(
+        File(cachedLocalPath),
+        fit: BoxFit.fill,
+        alignment: Alignment.bottomCenter,
+        filterQuality: FilterQuality.high,
+      );
+    }
+
+    return Image.asset(
+      'assets/images/ssamanila_bg.png',
+      fit: BoxFit.fill,
+      alignment: Alignment.bottomCenter,
+      filterQuality: FilterQuality.high,
+      errorBuilder: (ctx, err, stack) {
+        if (logoUrl.trim().isNotEmpty) {
+          return Image.network(
+            logoUrl.trim(),
+            fit: BoxFit.fill,
+            alignment: Alignment.bottomCenter,
+            filterQuality: FilterQuality.high,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+
+  Widget _buildTapStatusBanner({required bool isStopTapping}) {
+    return Container(
+      width: 720,
+      padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 12),
+      decoration: BoxDecoration(
+        color: isStopTapping ? const Color(0xFFDC3545) : const Color(0xFF28A745),
+        borderRadius: BorderRadius.circular(6),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 10,
+            offset: Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Text(
+        isStopTapping ? 'PLEASE WAIT...' : 'TAP YOUR ID.',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 34,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSsaManilaHeader({
+    required String placeName,
+    required bool isOffline,
+    required bool isSyncingRoster,
+    required AssetSyncProgress assetProgress,
+  }) {
+    return Container(
+      height: 54,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 5,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Place Name (Clickable to change place)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: InkWell(
+              onTap: _showGateSelectionDialog,
+              child: Text(
+                placeName,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ),
+          ),
+
+          const Spacer(),
+
+          // Formatted Live Date & Time: "October 30, 2026 08:51 AM"
+          SsaManilaClockText(onTap: _showDateTimeSettingsDialog),
+          const SizedBox(width: 16),
+
+          // Action Controls: WiFi, Sync, Activity Logs, Fullscreen, Close
+          _buildActionControls(
+            isOffline: isOffline,
+            isSyncingRoster: isSyncingRoster,
+            assetProgress: assetProgress,
+            showDateTimePill: false,
+          ),
+          const SizedBox(width: 8),
+          _buildWindowControls(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionControls({
+    required bool isOffline,
+    required bool isSyncingRoster,
+    required AssetSyncProgress assetProgress,
+    bool showDateTimePill = true,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Connection Signal Icon (Green = Online, Gray = Offline)
+        Tooltip(
+          message: isOffline ? 'Offline' : 'Online',
+          child: Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: Colors.white24),
+            ),
+            child: Icon(
+              Icons.wifi,
+              size: 18,
+              color: isOffline
+                  ? const Color(0xFF9CA3AF)
+                  : const Color(0xFF22C55E),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+
+        // Manual Resync Button
+        Tooltip(
+          message: isSyncingRoster
+              ? 'Resyncing application...'
+              : 'Resync application',
+          child: Material(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(4),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(4),
+              onTap: (isSyncingRoster || isOffline) ? null : _manualSyncRoster,
+              child: Container(
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: isSyncingRoster
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : Icon(
+                        Icons.sync,
+                        size: 18,
+                        color: isOffline ? Colors.white38 : Colors.white,
+                      ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+
+        // Activity Logs Button
+        Tooltip(
+          message: 'Activity Logs',
+          child: Material(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(4),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(4),
+              onTap: _showActivityLogsDialog,
+              child: Container(
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: const Icon(
+                  Icons.history,
+                  size: 18,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ),
+
+        if (showDateTimePill) ...[
+          const SizedBox(width: 8),
+          // Live Kiosk Clock & Date (Clickable to adjust Date & Time)
+          KioskClockPill(onTap: _showDateTimeSettingsDialog),
+        ],
+
+        // Asset Download Progress Bar
+        if (assetProgress.isDownloading || assetProgress.isFinished) ...[
+          const SizedBox(width: 8),
+          _buildAssetDownloadProgressBar(assetProgress),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildWindowControls() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Fullscreen Toggle Button
+        Tooltip(
+          message: _isFullScreen ? 'Exit Fullscreen' : 'Fullscreen',
+          child: Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(4),
+            elevation: 2,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(4),
+              mouseCursor: SystemMouseCursors.click,
+              onTap: _toggleFullScreen,
+              child: Container(
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: const Color(0xFFDCDFE6)),
+                ),
+                child: Icon(
+                  _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                  size: 20,
+                  color: const Color(0xFF606266),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        // Close Application Button
+        Tooltip(
+          message: 'Close Application',
+          child: Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(4),
+            elevation: 2,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(4),
+              mouseCursor: SystemMouseCursors.click,
+              onTap: _handleCloseApp,
+              child: Container(
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: const Color(0xFFDCDFE6)),
+                ),
+                child: const Icon(
+                  Icons.close,
+                  size: 20,
+                  color: Color(0xFF606266),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSchoolLogo(bool isOffline, {bool isLargeLayout = false}) {
     final localDb = ref.watch(localDbServiceProvider);
     final cachedLocalPath = localDb.getCachedSchoolLogoPath();
@@ -528,6 +827,13 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     final screenWidth = MediaQuery.of(context).size.width;
     final isLargeLayout = _isFullScreen || screenWidth >= 1400;
 
+    final branchCode = (activeGate.branchCode.isNotEmpty
+            ? activeGate.branchCode
+            : EnvConfig.defaultBranch)
+        .toLowerCase()
+        .trim();
+    final isSsaManila = branchCode == 'ssamanila' || branchCode == 'sscmanila';
+
     return Scaffold(
       backgroundColor: EnvConfig.backgroundColor,
       body: Focus(
@@ -549,107 +855,158 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
           onTap: () => _focusNode.requestFocus(),
           child: Stack(
             children: [
-              SafeArea(
-                child: Column(
-                  children: [
-                    const SizedBox(height: 14),
+              if (isSsaManila) ...[
+                // Full-screen architectural skyline line-art illustration
+                Positioned.fill(
+                  child: _buildSsaManilaBackground(),
+                ),
 
-                    // Main 2-Column Section (Left: Gate Name & Logo, Right: Tapping Graphic)
-                    Expanded(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          // LEFT COLUMN (~58%): Gate Name on Top + Large School Logo
-                          Expanded(
-                            flex: 14,
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                // Gate Name (Clickable to switch gate if needed)
-                                MouseRegion(
-                                  cursor: SystemMouseCursors.click,
-                                  child: InkWell(
-                                    onTap: _showGateSelectionDialog,
-                                    splashColor: Colors.transparent,
-                                    highlightColor: Colors.transparent,
-                                    mouseCursor: SystemMouseCursors.click,
-                                    child: Text(
-                                      placeName,
-                                      style: const TextStyle(
-                                        fontSize: 30,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white,
-                                        letterSpacing: 0.5,
+                // Top full-width header bar matching web version: Place Name, Date & Time, Controls
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: _buildSsaManilaHeader(
+                    placeName: placeName,
+                    isOffline: isOffline,
+                    isSyncingRoster: isSyncingRoster,
+                    assetProgress: assetProgress,
+                  ),
+                ),
+
+                // Centered Tap Status Banner: "TAP YOUR ID." (Green) / "PLEASE WAIT..." (Red)
+                Positioned(
+                  top: 72,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: _buildTapStatusBanner(
+                      isStopTapping: kioskState.hasActiveCards,
+                    ),
+                  ),
+                ),
+              ] else ...[
+                SafeArea(
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 14),
+
+                      // Main 2-Column Section (Left: Gate Name & Logo, Right: Tapping Graphic)
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            // LEFT COLUMN (~58%): Gate Name on Top + Large School Logo
+                            Expanded(
+                              flex: 14,
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  // Gate Name (Clickable to switch gate if needed)
+                                  MouseRegion(
+                                    cursor: SystemMouseCursors.click,
+                                    child: InkWell(
+                                      onTap: _showGateSelectionDialog,
+                                      splashColor: Colors.transparent,
+                                      highlightColor: Colors.transparent,
+                                      mouseCursor: SystemMouseCursors.click,
+                                      child: Text(
+                                        placeName,
+                                        style: const TextStyle(
+                                          fontSize: 30,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                          letterSpacing: 0.5,
+                                        ),
+                                        textAlign: TextAlign.center,
                                       ),
-                                      textAlign: TextAlign.center,
                                     ),
                                   ),
-                                ),
-                                const SizedBox(height: 35),
+                                  const SizedBox(height: 35),
 
-                                // Dynamic School Logo (with offline white circular placeholder)
-                                _buildSchoolLogo(isOffline, isLargeLayout: isLargeLayout),
-                              ],
+                                  // Dynamic School Logo (with offline white circular placeholder)
+                                  _buildSchoolLogo(isOffline, isLargeLayout: isLargeLayout),
+                                ],
+                              ),
                             ),
-                          ),
 
-                          // RIGHT COLUMN (~42%): RFID Tapping Graphic (Dynamically expands when fullscreen)
-                          Expanded(
-                            flex: 10,
-                            child: Center(
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 300),
-                                curve: Curves.easeInOut,
-                                width: isLargeLayout ? 620 : 440,
-                                height: isLargeLayout ? 620 : 440,
-                                child: Image.asset(
-                                  'assets/images/rfid_logo_new.png',
-                                  fit: BoxFit.contain,
-                                  errorBuilder: (ctx, err, stack) => Icon(
-                                    Icons.contactless,
-                                    size: isLargeLayout ? 380 : 260,
-                                    color: Colors.white,
+                            // RIGHT COLUMN (~42%): RFID Tapping Graphic (Dynamically expands when fullscreen)
+                            Expanded(
+                              flex: 10,
+                              child: Center(
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 300),
+                                  curve: Curves.easeInOut,
+                                  width: isLargeLayout ? 620 : 440,
+                                  height: isLargeLayout ? 620 : 440,
+                                  child: Image.asset(
+                                    'assets/images/rfid_logo_new.png',
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (ctx, err, stack) => Icon(
+                                      Icons.contactless,
+                                      size: isLargeLayout ? 380 : 260,
+                                      color: Colors.white,
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
 
-                    // BOTTOM BRANDING: "Powered by" + oa1.png
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 24.0),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text(
-                            'Powered by',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 0.5,
+                      // BOTTOM BRANDING: "Powered by" + oa1.png
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 24.0),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Powered by',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.5,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 4),
-                          Image.asset(
-                            'assets/images/oa1.png',
-                            width: 200,
-                            height: 70,
-                            fit: BoxFit.contain,
-                            errorBuilder: (ctx, err, stack) => const Text(
-                              'OrangeApps',
-                              style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+                            const SizedBox(height: 4),
+                            Image.asset(
+                              'assets/images/oa1.png',
+                              width: 200,
+                              height: 70,
+                              fit: BoxFit.contain,
+                              errorBuilder: (ctx, err, stack) => const Text(
+                                'OrangeApps',
+                                style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+
+                // Top Left Status & Action Controls
+                Positioned(
+                  top: 14,
+                  left: 14,
+                  child: _buildActionControls(
+                    isOffline: isOffline,
+                    isSyncingRoster: isSyncingRoster,
+                    assetProgress: assetProgress,
+                    showDateTimePill: true,
+                  ),
+                ),
+
+                // Top-Right Window Controls: Fullscreen Toggle & Close Button
+                Positioned(
+                  top: 14,
+                  right: 14,
+                  child: _buildWindowControls(),
+                ),
+              ],
 
               // DETERMINISTIC FLOATING CARD STACK (Push-Left & Stacking)
               if (kioskState.hasActiveCards)
@@ -678,184 +1035,6 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                     ),
                   ),
                 ),
-
-
-              // Top Left Status & Action Controls
-              Positioned(
-                top: 14,
-                left: 14,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Connection Signal Icon (Green = Online, Gray = Offline)
-                    Tooltip(
-                      message: isOffline ? 'Offline' : 'Online',
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: Colors.black26,
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: Colors.white24),
-                        ),
-                        child: Icon(
-                          Icons.wifi,
-                          size: 18,
-                          color: isOffline
-                              ? const Color(0xFF9CA3AF) // Gray when offline
-                              : const Color(0xFF22C55E), // Green when online
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-
-                    // Manual Resync Button
-                    Tooltip(
-                      message: isSyncingRoster
-                          ? 'Resyncing application...'
-                          : 'Resync application',
-                      child: Material(
-                        color: Colors.black26,
-                        borderRadius: BorderRadius.circular(4),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          onTap: (isSyncingRoster || isOffline) ? null : _manualSyncRoster,
-                          child: Container(
-                            width: 32,
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: Colors.white24),
-                            ),
-                            child: isSyncingRoster
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                    ),
-                                  )
-                                : Icon(
-                                    Icons.sync,
-                                    size: 18,
-                                    color: isOffline ? Colors.white38 : Colors.white,
-                                  ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-
-                    // Activity Logs Button
-                    Tooltip(
-                      message: 'Activity Logs',
-                      child: Material(
-                        color: Colors.black26,
-                        borderRadius: BorderRadius.circular(4),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          onTap: _showActivityLogsDialog,
-                          child: Container(
-                            width: 32,
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: Colors.white24),
-                            ),
-                            child: const Icon(
-                              Icons.history,
-                              size: 18,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-
-                    // Live Kiosk Clock & Date (Clickable to adjust Date & Time)
-                    KioskClockPill(onTap: _showDateTimeSettingsDialog),
-
-                    // Asset Download Progress Bar
-                    if (assetProgress.isDownloading || assetProgress.isFinished) ...[
-                      const SizedBox(width: 8),
-                      _buildAssetDownloadProgressBar(assetProgress),
-                    ],
-                  ],
-                ),
-              ),
-
-              // Top-Right Window Controls: Fullscreen Toggle & Close Button
-              Positioned(
-                top: 14,
-                right: 14,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Fullscreen Toggle Button (matching el-button in RfidReaderLink.vue)
-                    Tooltip(
-                      message: _isFullScreen ? 'Exit Fullscreen' : 'Fullscreen',
-                      child: Material(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(4),
-                        elevation: 2,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          mouseCursor: SystemMouseCursors.click,
-                          onTap: _toggleFullScreen,
-                          child: Container(
-                            width: 32,
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: const Color(0xFFDCDFE6)),
-                            ),
-                            child: Icon(
-                              _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                              size: 20,
-                              color: const Color(0xFF606266),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    // Close Application Button
-                    Tooltip(
-                      message: 'Close Application',
-                      child: Material(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(4),
-                        elevation: 2,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          mouseCursor: SystemMouseCursors.click,
-                          onTap: _handleCloseApp,
-                          child: Container(
-                            width: 32,
-                            height: 32,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: const Color(0xFFDCDFE6)),
-                            ),
-                            child: const Icon(
-                              Icons.close,
-                              size: 20,
-                              color: Color(0xFF606266),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
 
               // FULL-SCREEN FORCE UPDATE BLOCKER & DOWNLOAD PROGRESS
               if (isUpdateAvailable && !_isUpdateCompleted)
@@ -2013,6 +2192,72 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
             errorBuilder: (ctx, err, stack) => const SizedBox.shrink(),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Dedicated live clock text for St. Scholastica Manila kiosk header
+/// matching formattedDateTime in RfidReaderLink.vue: "October 30, 2026 08:51 AM"
+class SsaManilaClockText extends ConsumerStatefulWidget {
+  final VoidCallback onTap;
+  const SsaManilaClockText({super.key, required this.onTap});
+
+  @override
+  ConsumerState<SsaManilaClockText> createState() => _SsaManilaClockTextState();
+}
+
+class _SsaManilaClockTextState extends ConsumerState<SsaManilaClockText> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _formatLongDateTime(DateTime dt) {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    final mName = months[dt.month - 1];
+    final h = dt.hour > 12 ? dt.hour - 12 : (dt.hour == 0 ? 12 : dt.hour);
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '$mName ${dt.day}, ${dt.year} ${h.toString().padLeft(2, '0')}:$m $period';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final localDb = ref.watch(localDbServiceProvider);
+    final now = localDb.now;
+
+    return Tooltip(
+      message: 'Kiosk Date & Time (Click to adjust)',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: BorderRadius.circular(4),
+          child: Text(
+            _formatLongDateTime(now),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ),
       ),
     );
   }
