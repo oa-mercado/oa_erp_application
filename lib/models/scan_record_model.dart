@@ -74,6 +74,7 @@ class ScanRecordModel {
         'place_name': placeName,
         'scanned_at': scannedAt.toIso8601String(),
         'enter_at': enterAt,
+        'date_local': enterAt,
         'is_exit': isExit,
         if (studentId.isNotEmpty) 'student_id': studentId,
         if (studentIdDesc.isNotEmpty) 'student_id_desc': studentIdDesc,

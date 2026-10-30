@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
+import '../services/local_db_service.dart';
 import '../viewmodels/gate_selection_viewmodel.dart';
 
 /// Modal dialog matching Element-UI "Select Place Link" modal in Login.vue:
 /// Displays Branch Code and Place table with clickable blue links.
 class GateSelectionDialog extends StatefulWidget {
   final String? currentBranchCode;
+  final LocalDbService? localDb;
 
-  const GateSelectionDialog({super.key, this.currentBranchCode});
+  const GateSelectionDialog({super.key, this.currentBranchCode, this.localDb});
 
   @override
   State<GateSelectionDialog> createState() => _GateSelectionDialogState();
@@ -18,7 +20,7 @@ class _GateSelectionDialogState extends State<GateSelectionDialog> {
   @override
   void initState() {
     super.initState();
-    _viewModel = GateSelectionViewModel();
+    _viewModel = GateSelectionViewModel(localDb: widget.localDb);
     _viewModel.loadInitialData(initialBranchCode: widget.currentBranchCode);
   }
 

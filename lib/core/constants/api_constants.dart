@@ -28,4 +28,7 @@ class ApiConstants {
 
   /// Session-free endpoint for bulk syncing K-12, College, and Employee roster to SQLite Local DB
   static const String syncRosterEndpoint = '/kiosk_sync_roster';
+
+  /// Endpoint for fetching accurate server wall-clock time (`YYYY-MM-DD HH:mm:ss`)
+  static const String serverTimeEndpoint = '/server-time';
 }

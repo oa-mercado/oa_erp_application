@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 typedef OnRfidScannedCallback = void Function(String rfidCode);
 
@@ -7,19 +8,40 @@ class RfidScannerListener {
   final StringBuffer _buffer = StringBuffer();
   DateTime _lastKeystroke = DateTime.now();
   int _lastEventHash = 0;
+  bool isPaused = false;
+  bool _isStarted = false;
 
   RfidScannerListener({required this.onScanned});
 
   void start() {
+    if (_isStarted) return;
+    _isStarted = true;
     HardwareKeyboard.instance.addHandler(processKeyEvent);
   }
 
   void stop() {
+    if (!_isStarted) return;
+    _isStarted = false;
     HardwareKeyboard.instance.removeHandler(processKeyEvent);
   }
 
+  void clearBuffer() {
+    _buffer.clear();
+  }
+
   bool processKeyEvent(KeyEvent event) {
+    if (isPaused) return false;
     if (event is! KeyDownEvent) return false;
+
+    // Safety check: Never intercept keystrokes if the user is actively focused on an editable text field
+    final primaryFocus = FocusManager.instance.primaryFocus;
+    if (primaryFocus != null && primaryFocus.context != null && primaryFocus.context!.mounted) {
+      final widget = primaryFocus.context!.widget;
+      if (widget is EditableText) return false;
+      if (primaryFocus.context!.findAncestorWidgetOfExactType<EditableText>() != null) {
+        return false;
+      }
+    }
 
     // Prevent duplicate processing if both Focus and HardwareKeyboard fire for the same event
     final eventHash = Object.hash(event.logicalKey, event.timeStamp);

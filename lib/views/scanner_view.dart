@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,8 @@ import '../models/kiosk_state.dart';
 import '../models/scan_response_model.dart';
 import '../providers/kiosk_provider.dart';
 import '../services/update_service.dart';
+import 'activity_logs_dialog.dart';
+import 'date_time_settings_dialog.dart';
 import 'gate_selection_dialog.dart';
 
 /// RFID Kiosk View faithful to the OrangeApps ERP web kiosk:
@@ -28,9 +31,9 @@ class ScannerView extends ConsumerStatefulWidget {
   ConsumerState<ScannerView> createState() => _ScannerViewState();
 }
 
-class _ScannerViewState extends ConsumerState<ScannerView> {
+class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
   final FocusNode _focusNode = FocusNode();
-  bool _isFullScreen = false;
+  bool _isFullScreen = true;
   String? _dynamicLogoUrl;
 
   bool _isDownloadingUpdate = false;
@@ -91,19 +94,93 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
     }
   }
 
+  Future<void> _handleCloseApp() async {
+    final shouldClose = await _showKioskDialog<bool>(
+      (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Row(
+          children: [
+            Icon(Icons.power_settings_new, color: Color(0xFFE11D48)),
+            SizedBox(width: 8),
+            Text('Close Kiosk', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: const Text(
+          'Are you sure you want to close the RFID Kiosk application?',
+          style: TextStyle(fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFE11D48),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+      barrierDismissible: false,
+    );
+
+    if (shouldClose == true) {
+      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+        await windowManager.close();
+      }
+      exit(0);
+    }
+  }
+
   Future<void> _loadSchoolLogo() async {
-    final apiService = ref.read(apiServiceProvider);
-    final url = await apiService.ensureSessionAndFetchLogo();
-    if (mounted && url != null && url.isNotEmpty && url != _dynamicLogoUrl) {
-      setState(() {
-        _dynamicLogoUrl = url;
-      });
+    final localDb = ref.read(localDbServiceProvider);
+    final directLogo = ref.read(apiServiceProvider).schoolLogoUrl ?? EnvConfig.schoolLogoUrl;
+    if (directLogo.isNotEmpty) {
+      if (mounted && _dynamicLogoUrl != directLogo) {
+        setState(() {
+          _dynamicLogoUrl = directLogo;
+        });
+      }
+      if (localDb.getCachedSchoolLogoPath() == null) {
+        unawaited(localDb.downloadAndCacheSchoolLogo(directLogo).then((saved) {
+          if (mounted && saved != null) setState(() {});
+        }));
+      }
+    }
+    final activeGate = ref.read(activeGateProvider);
+    final scraped = await ref.read(apiServiceProvider).scrapeKioskAppearance(
+      branchCode: activeGate.branchCode,
+      gateId: activeGate.id,
+      localDb: localDb,
+    );
+    final discoveredLogo = scraped['logo_url'];
+    if (discoveredLogo != null && discoveredLogo.isNotEmpty) {
+      if (mounted && _dynamicLogoUrl != discoveredLogo) {
+        setState(() {
+          _dynamicLogoUrl = discoveredLogo;
+        });
+      }
+      unawaited(localDb.downloadAndCacheSchoolLogo(discoveredLogo).then((saved) {
+        if (mounted && saved != null) setState(() {});
+      }));
     }
   }
 
   @override
   void initState() {
     super.initState();
+    windowManager.addListener(this);
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      windowManager.setTitle(EnvConfig.appName);
+    }
+    windowManager.isFullScreen().then((isFull) {
+      if (mounted && _isFullScreen != isFull) {
+        setState(() => _isFullScreen = isFull);
+      }
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadSchoolLogo();
@@ -124,23 +201,148 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _focusNode.dispose();
     super.dispose();
   }
 
+  @override
+  void onWindowEnterFullScreen() {
+    if (mounted && !_isFullScreen) {
+      setState(() => _isFullScreen = true);
+    }
+  }
+
+  @override
+  void onWindowLeaveFullScreen() {
+    if (mounted && _isFullScreen) {
+      setState(() => _isFullScreen = false);
+    }
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (mounted && !_isFullScreen) {
+      setState(() => _isFullScreen = true);
+    }
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    windowManager.isFullScreen().then((isFull) {
+      if (mounted && _isFullScreen != isFull) {
+        setState(() => _isFullScreen = isFull);
+      }
+    });
+  }
+
+  Future<T?> _showKioskDialog<T>(WidgetBuilder builder, {bool barrierDismissible = true}) async {
+    try {
+      final listener = ref.read(kioskProvider.notifier).listener;
+      listener.isPaused = true;
+      listener.clearBuffer();
+    } catch (_) {}
+
+    try {
+      return await showDialog<T>(
+        context: context,
+        barrierDismissible: barrierDismissible,
+        builder: builder,
+      );
+    } finally {
+      try {
+        final listener = ref.read(kioskProvider.notifier).listener;
+        listener.isPaused = false;
+        listener.clearBuffer();
+      } catch (_) {}
+      if (mounted) {
+        _focusNode.requestFocus();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _focusNode.requestFocus();
+          }
+        });
+      }
+    }
+  }
+
   Future<void> _showGateSelectionDialog() async {
     final currentGate = ref.read(activeGateProvider);
-    final selectedGate = await showDialog<GateModel>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => GateSelectionDialog(currentBranchCode: currentGate.branchCode),
+    final localDb = ref.read(localDbServiceProvider);
+    final selectedGate = await _showKioskDialog<GateModel>(
+      (ctx) => GateSelectionDialog(
+        currentBranchCode: currentGate.branchCode,
+        localDb: localDb,
+      ),
     );
 
     if (selectedGate != null && mounted) {
       ref.read(kioskProvider.notifier).setGate(selectedGate);
       _loadSchoolLogo();
     }
-    _focusNode.requestFocus();
+  }
+
+  Future<void> _showActivityLogsDialog() async {
+    await _showKioskDialog<void>(
+      (ctx) => const ActivityLogsDialog(),
+    );
+  }
+
+  Future<void> _showDateTimeSettingsDialog() async {
+    final updated = await _showKioskDialog<bool>(
+      (ctx) => const DateTimeSettingsDialog(),
+    );
+    if (updated == true && mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Kiosk Date & Time updated and saved.'),
+          backgroundColor: Color(0xFF16A34A),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _manualSyncRoster() async {
+    final isOffline = ref.read(isOfflineProvider);
+    if (isOffline) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot resync while offline.'),
+            backgroundColor: Color(0xFFDC2626),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      await ref.read(kioskProvider.notifier).syncRosterFromServer();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Application has been resynced.'),
+            backgroundColor: Color(0xFF16A34A),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Resync error: $e'),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } finally {
+      _focusNode.requestFocus();
+    }
   }
 
   String _formatDate(DateTime dt) {
@@ -159,39 +361,147 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
     return '$h:$m:$s $period';
   }
 
-  Widget _buildSchoolLogo(bool isOffline) {
-    if (isOffline) {
-      return _buildPlaceholderLogo();
-    }
-    final logoUrl =
-        widget.networkLogoUrl ?? _dynamicLogoUrl ?? ref.read(apiServiceProvider).schoolLogoUrl;
-    if (logoUrl != null && logoUrl.trim().isNotEmpty) {
-      return Image.network(
-        logoUrl.trim(),
-        width: 390,
-        height: 390,
+  Widget _buildSchoolLogo(bool isOffline, {bool isLargeLayout = false}) {
+    final localDb = ref.watch(localDbServiceProvider);
+    final cachedLocalPath = localDb.getCachedSchoolLogoPath();
+    final maxW = isLargeLayout ? 960.0 : 580.0;
+    final maxH = isLargeLayout ? 600.0 : 420.0;
+
+    // 1. If we have a local cached image on disk, ALWAYS render directly from local disk!
+    // Passing explicit width & height with BoxFit.contain forces images smaller than
+    // the box (such as 612x342) to scale UP to fill the available space!
+    if (cachedLocalPath != null && File(cachedLocalPath).existsSync()) {
+      return Image.file(
+        File(cachedLocalPath),
+        width: maxW,
+        height: maxH,
         fit: BoxFit.contain,
-        loadingBuilder: (context, child, progress) {
-          if (progress == null) return child;
-          return _buildPlaceholderLogo();
-        },
-        errorBuilder: (context, error, stackTrace) => _buildPlaceholderLogo(),
+        filterQuality: FilterQuality.high,
+        errorBuilder: (ctx, err, stack) => _buildPlaceholderLogo(isLargeLayout: isLargeLayout),
       );
     }
-    return _buildPlaceholderLogo();
+
+    // 2. If not yet saved on disk, attempt Image.network and kick off disk caching
+    final logoUrl = widget.networkLogoUrl ??
+        _dynamicLogoUrl ??
+        ref.watch(apiServiceProvider).schoolLogoUrl ??
+        EnvConfig.schoolLogoUrl;
+
+    if (logoUrl.trim().isNotEmpty) {
+      return Image.network(
+        logoUrl.trim(),
+        width: maxW,
+        height: maxH,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.high,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          return _buildPlaceholderLogo(isLargeLayout: isLargeLayout);
+        },
+        errorBuilder: (context, error, stackTrace) =>
+            _buildPlaceholderLogo(isLargeLayout: isLargeLayout),
+      );
+    }
+
+    // 3. Fallback to built-in placeholder asset
+    return _buildPlaceholderLogo(isLargeLayout: isLargeLayout);
   }
 
-  Widget _buildPlaceholderLogo() {
+  Widget _buildPlaceholderLogo({bool isLargeLayout = false}) {
+    final logoSize = isLargeLayout ? 540.0 : 380.0;
     return Image.asset(
       'assets/images/placeholder_logo.png',
-      color: Colors.white, // White circular logo on maroon background
-      width: 390,
-      height: 390,
+      width: logoSize,
+      height: logoSize,
       fit: BoxFit.contain,
-      errorBuilder: (ctx, err, stack) => const Icon(
+      errorBuilder: (ctx, err, stack) => Icon(
         Icons.school_outlined,
-        size: 260,
+        size: logoSize * 0.7,
         color: Colors.white,
+      ),
+    );
+  }
+
+  Widget _buildAssetDownloadProgressBar(AssetSyncProgress assetProgress) {
+    if (assetProgress.isFinished) {
+      return Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: Colors.black45,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: const Color(0xFF22C55E).withValues(alpha: 0.6)),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.check_circle,
+              size: 15,
+              color: Color(0xFF22C55E),
+            ),
+            SizedBox(width: 6),
+            Text(
+              'Assets downloaded',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final processed = assetProgress.processed;
+    final total = assetProgress.total;
+    final ratio = assetProgress.progressRatio;
+
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: Colors.black45,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 13,
+            height: 13,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF38BDF8)),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            'Downloading assets ($processed / $total)',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 90,
+            height: 6,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: ratio,
+                backgroundColor: Colors.white24,
+                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF38BDF8)),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -200,6 +510,8 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
   Widget build(BuildContext context) {
     final activeGate = ref.watch(activeGateProvider);
     final isOffline = ref.watch(isOfflineProvider);
+    final isSyncingRoster = ref.watch(isSyncingRosterProvider);
+    final assetProgress = ref.watch(assetSyncProgressProvider);
     final kioskState = ref.watch(kioskScanProvider);
     final remoteStatus = ref.watch(remoteStatusProvider);
 
@@ -212,6 +524,9 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
     final placeName = activeGate.placeName.isNotEmpty
         ? activeGate.placeName
         : EnvConfig.defaultGateName;
+
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isLargeLayout = _isFullScreen || screenWidth >= 1400;
 
     return Scaffold(
       backgroundColor: EnvConfig.backgroundColor,
@@ -251,25 +566,29 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 // Gate Name (Clickable to switch gate if needed)
-                                InkWell(
-                                  onTap: _showGateSelectionDialog,
-                                  splashColor: Colors.transparent,
-                                  highlightColor: Colors.transparent,
-                                  child: Text(
-                                    placeName,
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                      letterSpacing: 0.5,
+                                MouseRegion(
+                                  cursor: SystemMouseCursors.click,
+                                  child: InkWell(
+                                    onTap: _showGateSelectionDialog,
+                                    splashColor: Colors.transparent,
+                                    highlightColor: Colors.transparent,
+                                    mouseCursor: SystemMouseCursors.click,
+                                    child: Text(
+                                      placeName,
+                                      style: const TextStyle(
+                                        fontSize: 30,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                        letterSpacing: 0.5,
+                                      ),
+                                      textAlign: TextAlign.center,
                                     ),
-                                    textAlign: TextAlign.center,
                                   ),
                                 ),
-                                const SizedBox(height: 20),
+                                const SizedBox(height: 35),
 
                                 // Dynamic School Logo (with offline white circular placeholder)
-                                _buildSchoolLogo(isOffline),
+                                _buildSchoolLogo(isOffline, isLargeLayout: isLargeLayout),
                               ],
                             ),
                           ),
@@ -281,14 +600,14 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
                               child: AnimatedContainer(
                                 duration: const Duration(milliseconds: 300),
                                 curve: Curves.easeInOut,
-                                width: _isFullScreen ? 520 : 360,
-                                height: _isFullScreen ? 520 : 360,
+                                width: isLargeLayout ? 620 : 440,
+                                height: isLargeLayout ? 620 : 440,
                                 child: Image.asset(
                                   'assets/images/rfid_logo_new.png',
                                   fit: BoxFit.contain,
                                   errorBuilder: (ctx, err, stack) => Icon(
                                     Icons.contactless,
-                                    size: _isFullScreen ? 320 : 220,
+                                    size: isLargeLayout ? 380 : 260,
                                     color: Colors.white,
                                   ),
                                 ),
@@ -361,58 +680,180 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
                 ),
 
 
-              // Minimal Connection Signal Icon (Top Left: Green = Online, Gray = Offline - UI only)
+              // Top Left Status & Action Controls
               Positioned(
                 top: 14,
                 left: 14,
-                child: Tooltip(
-                  message: isOffline ? 'Offline' : 'Online',
-                  child: Container(
-                    width: 32,
-                    height: 32,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: Colors.black26,
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.white24),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Connection Signal Icon (Green = Online, Gray = Offline)
+                    Tooltip(
+                      message: isOffline ? 'Offline' : 'Online',
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: Icon(
+                          Icons.wifi,
+                          size: 18,
+                          color: isOffline
+                              ? const Color(0xFF9CA3AF) // Gray when offline
+                              : const Color(0xFF22C55E), // Green when online
+                        ),
+                      ),
                     ),
-                    child: Icon(
-                      Icons.wifi,
-                      size: 18,
-                      color: isOffline
-                          ? const Color(0xFF9CA3AF) // Gray when offline
-                          : const Color(0xFF22C55E), // Green when online
+                    const SizedBox(width: 8),
+
+                    // Manual Resync Button
+                    Tooltip(
+                      message: isSyncingRoster
+                          ? 'Resyncing application...'
+                          : 'Resync application',
+                      child: Material(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(4),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          onTap: (isSyncingRoster || isOffline) ? null : _manualSyncRoster,
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: isSyncingRoster
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                    ),
+                                  )
+                                : Icon(
+                                    Icons.sync,
+                                    size: 18,
+                                    color: isOffline ? Colors.white38 : Colors.white,
+                                  ),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+
+                    // Activity Logs Button
+                    Tooltip(
+                      message: 'Activity Logs',
+                      child: Material(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(4),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          onTap: _showActivityLogsDialog,
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: const Icon(
+                              Icons.history,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+
+                    // Live Kiosk Clock & Date (Clickable to adjust Date & Time)
+                    KioskClockPill(onTap: _showDateTimeSettingsDialog),
+
+                    // Asset Download Progress Bar
+                    if (assetProgress.isDownloading || assetProgress.isFinished) ...[
+                      const SizedBox(width: 8),
+                      _buildAssetDownloadProgressBar(assetProgress),
+                    ],
+                  ],
                 ),
               ),
 
-              // Fullscreen Toggle Button (matching el-button in RfidReaderLink.vue)
+              // Top-Right Window Controls: Fullscreen Toggle & Close Button
               Positioned(
                 top: 14,
                 right: 14,
-                child: Material(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(4),
-                  elevation: 2,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(4),
-                    onTap: _toggleFullScreen,
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Fullscreen Toggle Button (matching el-button in RfidReaderLink.vue)
+                    Tooltip(
+                      message: _isFullScreen ? 'Exit Fullscreen' : 'Fullscreen',
+                      child: Material(
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: const Color(0xFFDCDFE6)),
-                      ),
-                      child: Icon(
-                        _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                        size: 20,
-                        color: const Color(0xFF606266),
+                        elevation: 2,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          mouseCursor: SystemMouseCursors.click,
+                          onTap: _toggleFullScreen,
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: const Color(0xFFDCDFE6)),
+                            ),
+                            child: Icon(
+                              _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                              size: 20,
+                              color: const Color(0xFF606266),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    // Close Application Button
+                    Tooltip(
+                      message: 'Close Application',
+                      child: Material(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(4),
+                        elevation: 2,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          mouseCursor: SystemMouseCursors.click,
+                          onTap: _handleCloseApp,
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: const Color(0xFFDCDFE6)),
+                            ),
+                            child: const Icon(
+                              Icons.close,
+                              size: 20,
+                              color: Color(0xFF606266),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
 
@@ -739,16 +1180,16 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
   }
 
 
-  /// Animated Kiosk Card: expands to 560px when active (newest),
-  /// or smoothly shrinks to 210px when pushed to the left by a newer card.
-  /// Fixed height (340px) guarantees cards never stretch or wrap into a tall ribbon.
+  /// Animated Kiosk Card: expands to 800px when active (newest),
+  /// or smoothly shrinks to 280px when pushed to the left by a newer card.
+  /// Fixed height (480px) guarantees cards never stretch or wrap into a tall ribbon.
   Widget _buildAnimatedKioskCard({
     required ActiveKioskCard card,
     required bool isPrevious,
     required String branchCode,
   }) {
-    const cardHeight = 340.0;
-    final cardWidth = isPrevious ? 210.0 : 560.0;
+    const cardHeight = 480.0;
+    final cardWidth = isPrevious ? 280.0 : 800.0;
 
     return AnimatedContainer(
       key: ValueKey('kiosk_card_${card.id}'),
@@ -758,24 +1199,33 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
       height: cardHeight,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: const [
-          BoxShadow(color: Colors.black45, blurRadius: 24, offset: Offset(0, 10)),
+          BoxShadow(color: Colors.black45, blurRadius: 28, offset: Offset(0, 12)),
         ],
       ),
       clipBehavior: Clip.antiAlias,
       child: AnimatedSwitcher(
         duration: const Duration(milliseconds: 200),
+        layoutBuilder: (Widget? currentChild, List<Widget> previousChildren) {
+          return Stack(
+            alignment: Alignment.topCenter,
+            children: <Widget>[
+              ...previousChildren,
+              ?currentChild,
+            ],
+          );
+        },
         child: isPrevious
             ? SizedBox(
                 key: ValueKey('min_${card.id}'),
-                width: 210.0,
+                width: 280.0,
                 height: cardHeight,
                 child: _buildMinimizedCardContent(card, branchCode),
               )
             : SizedBox(
                 key: ValueKey('full_${card.id}'),
-                width: 560.0,
+                width: 800.0,
                 height: cardHeight,
                 child: _buildFullCardContent(card, branchCode),
               ),
@@ -805,16 +1255,16 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
 
     return Column(
       children: [
-        // Compact Maroon Header
+        // Compact Dynamic School Header
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-          color: const Color(0xFF610303),
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
+          color: EnvConfig.backgroundColor,
           child: Text(
             title,
             style: const TextStyle(
               color: Colors.white,
-              fontSize: 12,
+              fontSize: 15,
               fontWeight: FontWeight.bold,
               letterSpacing: 0.5,
             ),
@@ -824,44 +1274,44 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
           ),
         ),
 
-        // Compact Body (Expanded with spaceEvenly to perfectly fill 340px height)
+        // Compact Body (Expanded with spaceEvenly to perfectly fill card height)
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Avatar (80x80)
+                // Avatar (115x115)
                 ClipOval(
                   child: Container(
-                    width: 80,
-                    height: 80,
+                    width: 115,
+                    height: 115,
                     color: const Color(0xFFF1F5F9),
                     child: card.isProcessing
-                        ? const Stack(
+                        ? Stack(
                             alignment: Alignment.center,
                             children: [
-                              Icon(Icons.person, size: 50, color: Color(0xFFCBD5E1)),
+                              const Icon(Icons.person, size: 70, color: Color(0xFFCBD5E1)),
                               SizedBox(
-                                width: 36,
-                                height: 36,
+                                width: 48,
+                                height: 48,
                                 child: CircularProgressIndicator(
-                                  strokeWidth: 2.5,
-                                  valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF610303)),
+                                  strokeWidth: 3,
+                                  valueColor: AlwaysStoppedAnimation<Color>(EnvConfig.backgroundColor),
                                 ),
                               ),
                             ],
                           )
                         : card.isSuccess
-                            ? _buildStudentAvatarImage(info, fullImageUrl, 80)
+                            ? _buildStudentAvatarImage(info, fullImageUrl, 115)
                             : (card.isError)
-                                ? const Icon(Icons.error_outline_rounded, size: 48, color: Color(0xFFDC2626))
+                                ? const Icon(Icons.error_outline_rounded, size: 68, color: Color(0xFFDC2626))
                                 : (card.isOfflineSaved)
-                                    ? const Icon(Icons.check_circle_outline_rounded, size: 48, color: Color(0xFF059669))
+                                    ? const Icon(Icons.check_circle_outline_rounded, size: 68, color: Color(0xFF059669))
                                     : (card.isCooldown)
-                                        ? const Icon(Icons.timer_outlined, size: 48, color: Color(0xFFD97706))
-                                        : _buildDefaultAvatar(80),
+                                        ? const Icon(Icons.timer_outlined, size: 68, color: Color(0xFFD97706))
+                                        : _buildDefaultAvatar(115),
                   ),
                 ),
 
@@ -880,109 +1330,109 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
                                       : 'LOADING...')))),
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: 16,
+                    fontSize: 20,
                     color: Color(0xFF0F172A),
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
 
-                // Status Badge
-                if (card.isSuccess && info != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEFF6FF),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFBFDBFE)),
-                    ),
-                    child: Text(
-                      info.ent ?? 'Entrance',
-                      style: const TextStyle(
-                        color: Color(0xFF1D4ED8),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  )
-                else if (card.isOfflineSaved)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFECFDF5),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFA7F3D0)),
-                    ),
-                    child: const Text(
-                      'Scanned',
-                      style: TextStyle(
-                        color: Color(0xFF059669),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  )
-                else if (card.isCooldown)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFFBEB),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFFDE68A)),
-                    ),
-                    child: Text(
-                      'Wait ${card.cooldownSecondsRemaining ?? 15}s',
-                      style: const TextStyle(
-                        color: Color(0xFFD97706),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  )
-                else if (card.isError)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFEF2F2),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFFECACA)),
-                    ),
-                    child: const Text(
-                      'Invalid',
-                      style: TextStyle(
-                        color: Color(0xFFDC2626),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  )
-                else
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                    ),
-                    child: const Text(
-                      'Loading...',
-                      style: TextStyle(
-                        color: Color(0xFF64748B),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
+                // Date & Time or Status Badge (never show Entrance/Exit badge)
+                if (card.isSuccess) ...[
+                  Text(
+                    info?.date ?? _formatDate(card.scannedAt),
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Color(0xFF64748B),
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-
-                // Time
-                Text(
-                  _formatTime(card.scannedAt),
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF64748B),
-                    fontWeight: FontWeight.w500,
+                  Text(
+                    info?.time ?? _formatTime(card.scannedAt),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      color: Color(0xFF1E293B),
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                ),
+                ] else ...[
+                  if (card.isOfflineSaved)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFECFDF5),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFA7F3D0)),
+                      ),
+                      child: const Text(
+                        'Scanned',
+                        style: TextStyle(
+                          color: Color(0xFF059669),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    )
+                  else if (card.isCooldown)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFFBEB),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFFDE68A)),
+                      ),
+                      child: Text(
+                        'Wait ${card.cooldownSecondsRemaining ?? 15}s',
+                        style: const TextStyle(
+                          color: Color(0xFFD97706),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    )
+                  else if (card.isError)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFFECACA)),
+                      ),
+                      child: const Text(
+                        'Invalid',
+                        style: TextStyle(
+                          color: Color(0xFFDC2626),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                      ),
+                      child: const Text(
+                        'Loading...',
+                        style: TextStyle(
+                          color: Color(0xFF64748B),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ),
+                  Text(
+                    _formatTime(card.scannedAt),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      color: Color(0xFF64748B),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1059,36 +1509,30 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
   /// Scenario 1 (Online, not in Local DB yet): Shows "YOUR CARD HAS BEEN SCANNED" while loading
   Widget _buildProcessingContent(DateTime scannedAt) {
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Card Header: Animated status
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-          decoration: BoxDecoration(
-            color: EnvConfig.backgroundColor,
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(16),
-              topRight: Radius.circular(16),
-            ),
-          ),
+          padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 28),
+          color: EnvConfig.backgroundColor,
           child: const Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               SizedBox(
-                width: 18,
-                height: 18,
+                width: 26,
+                height: 26,
                 child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
+                  strokeWidth: 3,
                   valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                 ),
               ),
-              SizedBox(width: 12),
+              SizedBox(width: 16),
               Text(
                 'YOUR CARD HAS BEEN SCANNED',
                 style: TextStyle(
                   color: Colors.white,
-                  fontSize: 20,
+                  fontSize: 26,
                   fontWeight: FontWeight.bold,
                   letterSpacing: 0.8,
                 ),
@@ -1098,150 +1542,153 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
         ),
 
         // Card Body
-        Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // Circular Profile Placeholder with loading indicator
-              ClipOval(
-                child: Container(
-                  width: 130,
-                  height: 130,
-                  color: const Color(0xFFF1F5F9),
-                  child: const Stack(
-                    alignment: Alignment.center,
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(40, 28, 40, 20),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Circular Profile Placeholder with loading indicator
+                ClipOval(
+                  child: Container(
+                    width: 190,
+                    height: 190,
+                    color: const Color(0xFFF1F5F9),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Icon(
+                          Icons.person,
+                          size: 110,
+                          color: Color(0xFFCBD5E1),
+                        ),
+                        SizedBox(
+                          width: 76,
+                          height: 76,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 4,
+                            valueColor: AlwaysStoppedAnimation<Color>(EnvConfig.backgroundColor),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 36),
+
+                // Details Column with loading indicators
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.person,
-                        size: 76,
-                        color: Color(0xFFCBD5E1),
+                      const Row(
+                        children: [
+                          Text(
+                            'STATUS : ',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF64748B),
+                              fontSize: 18,
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              'LOADING PROFILE...',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 24,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      SizedBox(
-                        width: 54,
-                        height: 54,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 3.5,
-                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF610303)),
+                      const SizedBox(height: 14),
+
+                      // DATE
+                      Row(
+                        children: [
+                          const Text(
+                            'DATE : ',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF64748B),
+                              fontSize: 16,
+                            ),
+                          ),
+                          Text(
+                            _formatDate(scannedAt),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 18,
+                              color: Color(0xFF1E293B),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+
+                      // TIME
+                      Row(
+                        children: [
+                          const Text(
+                            'TIME : ',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF64748B),
+                              fontSize: 16,
+                            ),
+                          ),
+                          Text(
+                            _formatTime(scannedAt),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 18,
+                              color: Color(0xFF1E293B),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 18),
+
+                      // Linear Progress bar
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          minHeight: 10,
+                          backgroundColor: const Color(0xFFF1F5F9),
+                          valueColor: AlwaysStoppedAnimation<Color>(EnvConfig.backgroundColor),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Your card has been scanned. Fetching credentials...',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Color(0xFF94A3B8),
+                          fontStyle: FontStyle.italic,
                         ),
                       ),
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(width: 24),
-
-              // Details Column with loading indicators
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Text(
-                          'STATUS : ',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 14,
-                          ),
-                        ),
-                        Expanded(
-                          child: Text(
-                            'LOADING PROFILE...',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 18,
-                              color: Color(0xFF0F172A),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-
-                    // DATE
-                    Row(
-                      children: [
-                        const Text(
-                          'DATE : ',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 13,
-                          ),
-                        ),
-                        Text(
-                          _formatDate(scannedAt),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                            color: Color(0xFF1E293B),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-
-                    // TIME
-                    Row(
-                      children: [
-                        const Text(
-                          'TIME : ',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 13,
-                          ),
-                        ),
-                        Text(
-                          _formatTime(scannedAt),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                            color: Color(0xFF1E293B),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 14),
-
-                    // Linear Progress bar
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: const LinearProgressIndicator(
-                        minHeight: 6,
-                        backgroundColor: Color(0xFFF1F5F9),
-                        valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF610303)),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Your card has been scanned. Fetching credentials...',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF94A3B8),
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
 
         // Card Footer
         Padding(
-          padding: const EdgeInsets.only(bottom: 16.0),
+          padding: const EdgeInsets.only(bottom: 20.0),
           child: Image.asset(
             'assets/images/oa.png',
-            width: 160,
-            height: 48,
+            width: 190,
+            height: 58,
             fit: BoxFit.contain,
-            errorBuilder: (ctx, err, stack) => const Text(
+            errorBuilder: (ctx, err, stack) => Text(
               'OrangeApps',
-              style: TextStyle(color: Color(0xFF610303), fontWeight: FontWeight.bold),
+              style: TextStyle(color: EnvConfig.backgroundColor, fontWeight: FontWeight.bold),
             ),
           ),
         ),
@@ -1258,24 +1705,18 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
     );
 
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Card Header: Student Name
+        // Card Header: Student Name (flush at top, outer AnimatedContainer clips corners)
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-          decoration: BoxDecoration(
-            color: EnvConfig.backgroundColor,
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(16),
-              topRight: Radius.circular(16),
-            ),
-          ),
+          padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 24),
+          color: EnvConfig.backgroundColor,
           child: Text(
             info.name.toUpperCase(),
             style: const TextStyle(
               color: Colors.white,
-              fontSize: 22,
+              fontSize: 28,
               fontWeight: FontWeight.bold,
               letterSpacing: 0.8,
             ),
@@ -1286,141 +1727,119 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
         ),
 
         // Card Body
-        Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // Circular Profile Picture (prioritizes downloaded local image for 0ms & offline display)
-              ClipOval(
-                child: Container(
-                  width: 130,
-                  height: 130,
-                  color: const Color(0xFFF1F5F9),
-                  child: _buildStudentAvatarImage(info, fullImageUrl, 130),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(40, 24, 40, 20),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Circular Profile Picture (prioritizes downloaded local image for 0ms & offline display)
+                ClipOval(
+                  child: Container(
+                    width: 190,
+                    height: 190,
+                    color: const Color(0xFFF1F5F9),
+                    child: _buildStudentAvatarImage(info, fullImageUrl, 190),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 24),
+                const SizedBox(width: 36),
 
-              // Details Column
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Student ID
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: [
-                        Text(
-                          idLabel,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 14,
-                          ),
-                        ),
-                        Expanded(
-                          child: Text(
-                            info.personId.isNotEmpty ? info.personId : 'N/A',
+                // Details Column
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Student ID
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Text(
+                            idLabel,
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 22,
-                              color: Color(0xFF0F172A),
+                              color: Color(0xFF64748B),
+                              fontSize: 18,
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
+                          Expanded(
+                            child: Text(
+                              info.personId.isNotEmpty ? info.personId : 'N/A',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 32,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
 
-                    // DATE
-                    Row(
-                      children: [
-                        const Text(
-                          'DATE : ',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 13,
-                          ),
-                        ),
-                        Text(
-                          info.date ?? _formatDate(scannedAt),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                            color: Color(0xFF1E293B),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-
-                    // TIME
-                    Row(
-                      children: [
-                        const Text(
-                          'TIME : ',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF64748B),
-                            fontSize: 13,
-                          ),
-                        ),
-                        Text(
-                          info.time ?? _formatTime(scannedAt),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                            color: Color(0xFF1E293B),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Badges Row: Entrance/Exit
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 6,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFEFF6FF),
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: const Color(0xFFBFDBFE)),
-                          ),
-                          child: Text(
-                            info.ent ?? 'Entrance',
-                            style: const TextStyle(
-                              color: Color(0xFF1D4ED8),
+                      // DATE
+                      Row(
+                        children: [
+                          const Text(
+                            'DATE : ',
+                            style: TextStyle(
                               fontWeight: FontWeight.bold,
-                              fontSize: 13,
+                              color: Color(0xFF64748B),
+                              fontSize: 16,
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ],
+                          Text(
+                            info.date ?? _formatDate(scannedAt),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 18,
+                              color: Color(0xFF1E293B),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+
+                      // TIME
+                      Row(
+                        children: [
+                          const Text(
+                            'TIME : ',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF64748B),
+                              fontSize: 16,
+                            ),
+                          ),
+                          Text(
+                            info.time ?? _formatTime(scannedAt),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 18,
+                              color: Color(0xFF1E293B),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
 
         // Card Footer: Powered by OrangeApps logo
         Padding(
-          padding: const EdgeInsets.only(bottom: 16.0),
+          padding: const EdgeInsets.only(bottom: 20.0),
           child: Image.asset(
             'assets/images/oa.png',
-            width: 160,
-            height: 48,
+            width: 190,
+            height: 58,
             fit: BoxFit.contain,
-            errorBuilder: (ctx, err, stack) => const Text(
+            errorBuilder: (ctx, err, stack) => Text(
               'OrangeApps',
-              style: TextStyle(color: Color(0xFF610303), fontWeight: FontWeight.bold),
+              style: TextStyle(color: EnvConfig.backgroundColor, fontWeight: FontWeight.bold),
             ),
           ),
         ),
@@ -1476,79 +1895,75 @@ class _ScannerViewState extends ConsumerState<ScannerView> {
   /// Scenario 1 (Offline & not in Local DB yet): No loading spinner, says "PLEASE CONTINUE"
   Widget _buildOfflineSavedContent(int queuedCount, DateTime scannedAt) {
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Card Header
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-          decoration: const BoxDecoration(
-            color: Color(0xFF610303),
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(16),
-              topRight: Radius.circular(16),
-            ),
-          ),
+          padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 24),
+          color: EnvConfig.backgroundColor,
           child: const Text(
             'YOUR CARD HAS BEEN SCANNED',
             style: TextStyle(
               color: Colors.white,
-              fontSize: 20,
+              fontSize: 26,
               fontWeight: FontWeight.bold,
               letterSpacing: 0.8,
             ),
             textAlign: TextAlign.center,
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(
-                Icons.check_circle_outline_rounded,
-                size: 72,
-                color: Color(0xFF059669),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'PLEASE CONTINUE',
-                style: TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(40, 24, 40, 20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                const Icon(
+                  Icons.check_circle_outline_rounded,
+                  size: 96,
                   color: Color(0xFF059669),
-                  letterSpacing: 0.8,
                 ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '${_formatDate(scannedAt)} • ${_formatTime(scannedAt)}',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1E293B),
+                const Text(
+                  'PLEASE CONTINUE',
+                  style: TextStyle(
+                    fontSize: 34,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF059669),
+                    letterSpacing: 0.8,
+                  ),
+                  textAlign: TextAlign.center,
                 ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Tap recorded locally and will sync automatically when online.',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Color(0xFF64748B),
+                Text(
+                  '${_formatDate(scannedAt)} • ${_formatTime(scannedAt)}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1E293B),
+                  ),
+                  textAlign: TextAlign.center,
                 ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 18),
-              Image.asset(
-                'assets/images/oa.png',
-                width: 140,
-                height: 40,
-                fit: BoxFit.contain,
-                errorBuilder: (ctx, err, stack) => const SizedBox.shrink(),
-              ),
-            ],
+                const Text(
+                  'Tap recorded locally and will sync automatically when online.',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Color(0xFF64748B),
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+        // Card Footer
+        Padding(
+          padding: const EdgeInsets.only(bottom: 20.0),
+          child: Image.asset(
+            'assets/images/oa.png',
+            width: 190,
+            height: 58,
+            fit: BoxFit.contain,
+            errorBuilder: (ctx, err, stack) => const SizedBox.shrink(),
           ),
         ),
       ],

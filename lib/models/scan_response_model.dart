@@ -106,41 +106,95 @@ class StudentInfoModel {
 /// Represents the response received from POST /save_rfid_entry
 class ScanResponseModel {
   final bool isSuccess;
+  final bool isNetworkError;
+  final int httpStatusCode;
   final String? message;
   final String? title;
   final int? status;
   final int isCommuter;
+  final int tapOnInterval;
   final StudentInfoModel? studentInfo;
 
   ScanResponseModel({
     required this.isSuccess,
+    this.isNetworkError = false,
+    this.httpStatusCode = 200,
     this.message,
     this.title,
     this.status,
     this.isCommuter = 0,
+    this.tapOnInterval = 0,
     this.studentInfo,
   });
 
-  factory ScanResponseModel.fromJson(Map<String, dynamic> json) {
+  /// True when the server indicates this scan occurred within the tap interval (already entered/recorded).
+  /// In this case, the server will not record a new attendance row, so the kiosk must display the
+  /// student info but discard/skip saving this tap to local history (stud_entry_tbl).
+  bool get isTapOnInterval => tapOnInterval == 1;
+
+  /// True ONLY when the server responded HTTP 200 and explicitly rejected the RFID card
+  /// (e.g. "Unable to Process Transaction Code Not Found", "Invalid ID!", "Reported Lost").
+  /// Returns FALSE for network errors, timeouts, HTTP 404, 419, 500, etc.
+  bool get isPermanentRejection {
+    if (isNetworkError || isSuccess) return false;
+    if (httpStatusCode != 200) return false;
+
+    final msg = (message ?? '').toLowerCase();
+    final ttl = (title ?? '').toLowerCase();
+
+    return msg.contains('not found') ||
+        msg.contains('invalid id') ||
+        msg.contains('unable to process') ||
+        msg.contains('reported lost') ||
+        ttl.contains('invalid id') ||
+        ttl.contains('not found') ||
+        status == 0;
+  }
+
+  /// True ONLY when connection failed at the socket / transport layer (no HTTP response received from server)
+  bool get isConnectionFailure =>
+      isNetworkError && httpStatusCode == 0;
+
+  /// True if the server responded with an HTTP error status code (404, 405, 419, 500, etc.)
+  bool get isServerError =>
+      httpStatusCode >= 400 && httpStatusCode < 600;
+
+  factory ScanResponseModel.fromJson(Map<String, dynamic> json, {int httpStatusCode = 200}) {
     final hasInfo = json['info'] != null && json['info'] is Map<String, dynamic>;
-    final statusVal = json['status'] is int ? json['status'] : null;
-    final isSuccess = (statusVal == null || statusVal != 0) && hasInfo;
+    final statusVal = json['status'] is int
+        ? json['status'] as int
+        : int.tryParse(json['status']?.toString() ?? '');
+    final codeVal = json['code'] is int
+        ? json['code'] as int
+        : int.tryParse(json['code']?.toString() ?? '');
+
+    // Success if neither status nor code is 0, and student info is present
+    final isExplicitFailure = statusVal == 0 || codeVal == 0;
+    final isSuccess = !isExplicitFailure && hasInfo;
+
     final commuterVal = json['is_commuter'] is int
         ? json['is_commuter']
         : int.tryParse(json['is_commuter']?.toString() ?? '0') ?? 0;
 
-    // Clean HTML tags from message if present (e.g. <b>Unable to Process...</b>)
-    String? rawMsg = json['message']?.toString();
+    final tapIntervalVal = json['tap_on_interval'] is int
+        ? json['tap_on_interval'] as int
+        : int.tryParse(json['tap_on_interval']?.toString() ?? '0') ?? 0;
+
+    // Clean HTML tags from message or text if present (e.g. <b>Unable to Process...</b> or "ID Not Found!")
+    String? rawMsg = (json['message'] ?? json['text'])?.toString();
     if (rawMsg != null) {
-      rawMsg = rawMsg.replaceAll(RegExp(r'<[^>]*>'), '');
+      rawMsg = rawMsg.replaceAll(RegExp(r'<[^>]*>'), '').trim();
     }
 
     return ScanResponseModel(
       isSuccess: isSuccess,
+      isNetworkError: false,
+      httpStatusCode: httpStatusCode,
       message: rawMsg,
       title: json['title']?.toString(),
-      status: statusVal,
+      status: statusVal ?? codeVal,
       isCommuter: commuterVal,
+      tapOnInterval: tapIntervalVal,
       studentInfo: hasInfo
           ? StudentInfoModel.fromJson(
               json['info'] as Map<String, dynamic>,
@@ -150,12 +204,14 @@ class ScanResponseModel {
     );
   }
 
-  factory ScanResponseModel.networkError(String message) {
+  factory ScanResponseModel.networkError(String message, {int httpStatusCode = 0}) {
     return ScanResponseModel(
       isSuccess: false,
+      isNetworkError: true,
+      httpStatusCode: httpStatusCode,
       message: message,
       title: 'Connection Error',
-      status: 0,
+      status: null,
     );
   }
 }

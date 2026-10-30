@@ -137,9 +137,40 @@ class EnvConfig {
     return 'schooltesterp';
   }
 
-  /// Custom background / theme color from .env (e.g. #610303, 610303, #004d40)
+  static String? _dynamicAppName;
+  static Color? _dynamicBackgroundColor;
+  static String? _dynamicSchoolLogoUrl;
+
+  /// Custom app display name from .env (e.g. Dominican Sta Rosa RFID).
+  /// Easily customizable per school without modifying the installer.
+  static String get appName {
+    if (_dynamicAppName != null && _dynamicAppName!.trim().isNotEmpty) {
+      return _dynamicAppName!.trim();
+    }
+    final configured = get('APP_NAME').trim();
+    if (configured.isNotEmpty) return configured;
+    return 'Dominican Sta Rosa RFID';
+  }
+
+  /// Sets dynamic kiosk appearance values discovered online or loaded from SQLite
+  static void setDynamicAppearance({String? appName, Color? color, String? logoUrl}) {
+    if (appName != null && appName.trim().isNotEmpty) {
+      _dynamicAppName = appName.trim();
+    }
+    if (color != null) {
+      _dynamicBackgroundColor = color;
+    }
+    if (logoUrl != null && logoUrl.trim().isNotEmpty) {
+      _dynamicSchoolLogoUrl = logoUrl.trim();
+    }
+  }
+
+  /// Custom background / theme color from dynamic discovery or .env (e.g. #083980)
   static Color get backgroundColor {
-    final hexStr = get('PRIMARY_COLOR', defaultValue: '#610303').replaceAll('#', '').trim();
+    if (_dynamicBackgroundColor != null) {
+      return _dynamicBackgroundColor!;
+    }
+    final hexStr = get('PRIMARY_COLOR', defaultValue: '#083980').replaceAll('#', '').trim();
     if (hexStr.length == 6) {
       final val = int.tryParse('FF$hexStr', radix: 16);
       if (val != null) return Color(val);
@@ -147,7 +178,7 @@ class EnvConfig {
       final val = int.tryParse(hexStr, radix: 16);
       if (val != null) return Color(val);
     }
-    return const Color(0xFF610303);
+    return const Color(0xFF083980);
   }
 
   /// URL pointing to the GCS version.json configuration file
@@ -155,6 +186,16 @@ class EnvConfig {
         'VERSION_CHECK_URL',
         defaultValue: 'https://storage.googleapis.com/oa-erp-app/rfid/version/version.json',
       );
+
+  /// School Logo URL from dynamic discovery, .env, or fallback
+  static String get schoolLogoUrl {
+    if (_dynamicSchoolLogoUrl != null && _dynamicSchoolLogoUrl!.trim().isNotEmpty) {
+      return _dynamicSchoolLogoUrl!.trim();
+    }
+    final direct = get('SCHOOL_LOGO_URL').trim();
+    if (direct.isNotEmpty) return direct;
+    return 'https://storage.googleapis.com/hrpai/background_images/1228854_1228854';
+  }
 
   /// Configurable RFID tap endpoint from .env (`student_entry` or `save_rfid_entry`)
   static String get tapEndpoint {

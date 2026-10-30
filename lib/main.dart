@@ -12,15 +12,19 @@ void main() async {
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
 
-    const windowOptions = WindowOptions(
-      size: Size(1280, 768),
-      minimumSize: Size(960, 600),
+    final windowOptions = WindowOptions(
+      size: const Size(1280, 768),
+      minimumSize: const Size(960, 600),
       center: true,
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
-      title: 'OrangeApps RFID Kiosk',
+      title: EnvConfig.appName,
+      titleBarStyle: TitleBarStyle.hidden,
+      fullScreen: true,
     );
     windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: false);
+      await windowManager.setFullScreen(true);
       await windowManager.show();
       await windowManager.focus();
     });
@@ -35,13 +39,13 @@ class OrangeAppsRfidApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OrangeApps RFID Scanner',
+      title: EnvConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF2563EB),
-          primary: const Color(0xFF2563EB),
+          seedColor: EnvConfig.backgroundColor,
+          primary: EnvConfig.backgroundColor,
         ),
         fontFamily: 'Segoe UI',
       ),
