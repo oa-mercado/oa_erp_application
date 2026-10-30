@@ -1367,6 +1367,30 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     required bool isPrevious,
     required String branchCode,
   }) {
+    final isSsaManila = branchCode.toLowerCase().trim() == 'ssamanila' ||
+        branchCode.toLowerCase().trim() == 'sscmanila';
+
+    if (isSsaManila) {
+      // SSC Manila Web Replicating Card Style (Sharp borders, exact proportions matching web)
+      return Container(
+        key: ValueKey('kiosk_card_${card.id}'),
+        width: 720.0,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border.all(color: const Color(0xFFDCDFE6), width: 1),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 16,
+              offset: Offset(0, 6),
+            ),
+          ],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: _buildFullCardContent(card, branchCode),
+      );
+    }
+
     const cardHeight = 480.0;
     final cardWidth = isPrevious ? 280.0 : 800.0;
 
@@ -1877,6 +1901,13 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
 
   /// Full student tap confirmation card (works both Online and Offline via Local DB)
   Widget _buildStudentCardContent(StudentInfoModel info, DateTime scannedAt, String branchCode) {
+    final isSsaManila = branchCode.toLowerCase().trim() == 'ssamanila' ||
+        branchCode.toLowerCase().trim() == 'sscmanila';
+
+    if (isSsaManila) {
+      return _buildSsaManilaStudentCardContent(info, scannedAt, branchCode);
+    }
+
     final isStudent = info.type?.toLowerCase() != 'employee';
     final idLabel = isStudent ? 'STUDENT # : ' : 'EMPLOYEE # : ';
     final fullImageUrl = info.getFullImageUrl(
@@ -2020,6 +2051,170 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
               'OrangeApps',
               style: TextStyle(color: EnvConfig.backgroundColor, fontWeight: FontWeight.bold),
             ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Replica of SSC Manila Web Card UI
+  Widget _buildSsaManilaStudentCardContent(StudentInfoModel info, DateTime scannedAt, String branchCode) {
+    final isStudent = info.type?.toLowerCase() != 'employee';
+    final idLabel = isStudent ? 'STUDENT # : ' : 'Employee # : ';
+    final fullImageUrl = info.getFullImageUrl(
+      branchCode.isNotEmpty ? EnvConfig.getBranchBaseUrl(branchCode) : ApiConstants.defaultBaseUrl,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Card Header: Solid Crimson Red background (#D10C15) with Bold White Name
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+          color: const Color(0xFFD10C15),
+          alignment: Alignment.center,
+          child: Text(
+            info.name,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.3,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+
+        // Card Body: Clean white background
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Top Centered 200x200 Avatar
+              Center(
+                child: ClipOval(
+                  child: Container(
+                    width: 180,
+                    height: 180,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
+                    ),
+                    child: _buildStudentAvatarImage(info, fullImageUrl, 180),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Left-aligned Details with text-muted labels
+              Padding(
+                padding: const EdgeInsets.only(left: 36.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Student / Employee ID
+                    RichText(
+                      text: TextSpan(
+                        children: [
+                          TextSpan(
+                            text: idLabel,
+                            style: const TextStyle(
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF6C757D), // Bootstrap text-muted
+                            ),
+                          ),
+                          TextSpan(
+                            text: info.personId.isNotEmpty ? info.personId : 'N/A',
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF212529),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    // DATE
+                    RichText(
+                      text: TextSpan(
+                        children: [
+                          const TextSpan(
+                            text: 'DATE : ',
+                            style: TextStyle(
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF6C757D),
+                            ),
+                          ),
+                          TextSpan(
+                            text: info.date ?? _formatDate(scannedAt),
+                            style: const TextStyle(
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF212529),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    // TIME
+                    RichText(
+                      text: TextSpan(
+                        children: [
+                          const TextSpan(
+                            text: 'TIME : ',
+                            style: TextStyle(
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF6C757D),
+                            ),
+                          ),
+                          TextSpan(
+                            text: info.time ?? _formatTime(scannedAt),
+                            style: const TextStyle(
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF212529),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // Bottom Powered by OrangeApps (exact powered.png from web)
+              Center(
+                child: Image.asset(
+                  'assets/images/powered.png',
+                  height: 32,
+                  fit: BoxFit.contain,
+                  errorBuilder: (ctx, err, stack) => Image.asset(
+                    'assets/images/oa.png',
+                    height: 32,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) => const Text(
+                      'Powered by OrangeApps',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
           ),
         ),
       ],
