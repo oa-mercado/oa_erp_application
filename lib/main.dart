@@ -5,8 +5,26 @@ import 'package:window_manager/window_manager.dart';
 import 'core/config/env_config.dart';
 import 'views/scanner_view.dart';
 
+/// Custom HttpOverrides to handle OrangeApps ERP servers (e.g. dominicanstarosaerp.orangeapps.ph)
+/// whose Apache SSL config omits the GoDaddy G2 intermediate certificate from the TLS handshake.
+class OrangeAppsHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.badCertificateCallback = (X509Certificate cert, String host, int port) {
+      final cleanHost = host.toLowerCase().trim();
+      return cleanHost == 'orangeapps.ph' ||
+          cleanHost.endsWith('.orangeapps.ph') ||
+          cleanHost == 'localhost' ||
+          cleanHost == '127.0.0.1';
+    };
+    return client;
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = OrangeAppsHttpOverrides();
   await EnvConfig.init();
 
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {

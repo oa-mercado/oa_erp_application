@@ -268,10 +268,12 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
 
   Future<void> _showGateSelectionDialog() async {
     final currentGate = ref.read(activeGateProvider);
+    final apiService = ref.read(apiServiceProvider);
     final localDb = ref.read(localDbServiceProvider);
     final selectedGate = await _showKioskDialog<GateModel>(
       (ctx) => GateSelectionDialog(
         currentBranchCode: currentGate.branchCode,
+        apiService: apiService,
         localDb: localDb,
       ),
     );
@@ -305,8 +307,9 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
   }
 
   Future<void> _manualSyncRoster() async {
-    final isOffline = ref.read(isOfflineProvider);
-    if (isOffline) {
+    final notifier = ref.read(kioskProvider.notifier);
+    final isOnline = await notifier.checkConnectivity(forceSync: true);
+    if (!isOnline) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -320,7 +323,8 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     }
 
     try {
-      await ref.read(kioskProvider.notifier).syncRosterFromServer();
+      await notifier.syncRosterFromServer();
+      await notifier.syncOfflineQueue(force: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -730,7 +734,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                         borderRadius: BorderRadius.circular(4),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(4),
-                          onTap: (isSyncingRoster || isOffline) ? null : _manualSyncRoster,
+                          onTap: isSyncingRoster ? null : _manualSyncRoster,
                           child: Container(
                             width: 32,
                             height: 32,
@@ -748,10 +752,10 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                                       valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                     ),
                                   )
-                                : Icon(
+                                : const Icon(
                                     Icons.sync,
                                     size: 18,
-                                    color: isOffline ? Colors.white38 : Colors.white,
+                                    color: Colors.white,
                                   ),
                           ),
                         ),

@@ -147,7 +147,9 @@ class _ActivityLogsDialogState extends ConsumerState<ActivityLogsDialog> {
                     InkWell(
                       borderRadius: BorderRadius.circular(12),
                       onTap: () async {
-                        await ref.read(kioskScanProvider.notifier).syncOfflineQueue(force: true);
+                        final notifier = ref.read(kioskScanProvider.notifier);
+                        await notifier.checkConnectivity(forceSync: true);
+                        await notifier.syncOfflineQueue(force: true);
                         _loadLogs();
                       },
                       child: Container(

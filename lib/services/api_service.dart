@@ -124,7 +124,7 @@ class ApiService {
     try {
       final sw = Stopwatch()..start();
       final uri = Uri.parse('$_baseUrl${ApiConstants.serverTimeEndpoint}');
-      final res = await http.get(uri, headers: {'Accept': 'application/json'}).timeout(const Duration(seconds: 5));
+      final res = await http.get(uri, headers: {'Accept': 'application/json'}).timeout(const Duration(seconds: 15));
       sw.stop();
       _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
 
@@ -187,7 +187,7 @@ class ApiService {
       final uri = Uri.parse('$_baseUrl${ApiConstants.schoolImageEndpoint}');
       final res = await http
           .get(uri, headers: {'Accept': 'application/json, text/plain, */*'})
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 15));
       sw.stop();
       _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
 
@@ -246,7 +246,7 @@ class ApiService {
       final res = await http.get(uri, headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OrangeAppsKiosk/1.0',
-      }).timeout(const Duration(seconds: 8));
+      }).timeout(const Duration(seconds: 15));
 
       if (res.statusCode == 200 && res.body.isNotEmpty) {
         final html = res.body;
@@ -304,7 +304,7 @@ class ApiService {
         final res = await _postWithFallback(
           '/reader/background',
           body: jsonEncode({'branch_code': cleanBranch}),
-          timeout: const Duration(seconds: 8),
+          timeout: const Duration(seconds: 15),
           requiresCsrf: true,
         );
         if (res != null && res.statusCode == 200) {
@@ -360,7 +360,7 @@ class ApiService {
     try {
       final sw = Stopwatch()..start();
       final uri = Uri.parse('$_baseUrl${ApiConstants.schoolImageEndpoint}');
-      final res = await http.get(uri).timeout(const Duration(seconds: 5));
+      final res = await http.get(uri).timeout(const Duration(seconds: 15));
       sw.stop();
       _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
       return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
@@ -384,7 +384,7 @@ class ApiService {
   Future<http.Response?> _postWithFallback(
     String endpoint, {
     Object? body,
-    Duration timeout = const Duration(seconds: 8),
+    Duration timeout = const Duration(seconds: 15),
     bool requiresCsrf = false,
     String? contentType,
   }) async {
@@ -435,7 +435,7 @@ class ApiService {
   Future<List<BranchModel>> fetchBranches() async {
     final response = await _postWithFallback(
       ApiConstants.branchesEndpoint,
-      timeout: const Duration(seconds: 10),
+      timeout: const Duration(seconds: 15),
       requiresCsrf: true,
     );
     if (response != null && response.statusCode == 200) {
@@ -457,7 +457,7 @@ class ApiService {
     final response = await _postWithFallback(
       ApiConstants.placesEndpoint,
       body: body,
-      timeout: const Duration(seconds: 10),
+      timeout: const Duration(seconds: 15),
       requiresCsrf: true,
     );
     if (response != null && response.statusCode == 200) {
@@ -530,23 +530,31 @@ class ApiService {
 
   Future<ScanResponseModel> _executeSendRfidScan(ScanRecordModel scan) async {
     final endpoint = ApiConstants.saveRfidEntryEndpoint;
-    final payloadMap = scan.toErpPayload().map((k, v) => MapEntry(k, v.toString()));
+    final isStudentEntryEndpoint = endpoint.toLowerCase().contains('student_entry');
+    final rawPayload = scan.toErpPayload();
+    final payloadMap = rawPayload.map((k, v) => MapEntry(k, v.toString()));
+    final requestContentType = isStudentEntryEndpoint
+        ? 'application/json'
+        : 'application/x-www-form-urlencoded';
+    final Object requestBody = isStudentEntryEndpoint
+        ? jsonEncode(rawPayload)
+        : payloadMap;
 
     // ignore: avoid_print
     print('[ApiService RFID Tap] POST $endpoint');
     // ignore: avoid_print
     print('[ApiService RFID Tap] Full URL: $_baseUrl$endpoint');
     // ignore: avoid_print
-    print('[ApiService RFID Tap] Headers: Content-Type: application/x-www-form-urlencoded');
+    print('[ApiService RFID Tap] Headers: Content-Type: $requestContentType');
     // ignore: avoid_print
-    print('[ApiService RFID Tap] Payload: $payloadMap');
+    print('[ApiService RFID Tap] Payload: $rawPayload');
 
     final response = await _postWithFallback(
       endpoint,
-      body: payloadMap,
-      contentType: 'application/x-www-form-urlencoded',
-      timeout: const Duration(seconds: 15),
-      requiresCsrf: false,
+      body: requestBody,
+      contentType: requestContentType,
+      timeout: const Duration(seconds: 20),
+      requiresCsrf: isStudentEntryEndpoint,
     );
 
     if (response != null) {

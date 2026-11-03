@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/api_service.dart';
 import '../services/local_db_service.dart';
 import '../viewmodels/gate_selection_viewmodel.dart';
 
@@ -6,9 +7,15 @@ import '../viewmodels/gate_selection_viewmodel.dart';
 /// Displays Branch Code and Place table with clickable blue links.
 class GateSelectionDialog extends StatefulWidget {
   final String? currentBranchCode;
+  final ApiService? apiService;
   final LocalDbService? localDb;
 
-  const GateSelectionDialog({super.key, this.currentBranchCode, this.localDb});
+  const GateSelectionDialog({
+    super.key,
+    this.currentBranchCode,
+    this.apiService,
+    this.localDb,
+  });
 
   @override
   State<GateSelectionDialog> createState() => _GateSelectionDialogState();
@@ -20,7 +27,10 @@ class _GateSelectionDialogState extends State<GateSelectionDialog> {
   @override
   void initState() {
     super.initState();
-    _viewModel = GateSelectionViewModel(localDb: widget.localDb);
+    _viewModel = GateSelectionViewModel(
+      apiService: widget.apiService,
+      localDb: widget.localDb,
+    );
     _viewModel.loadInitialData(initialBranchCode: widget.currentBranchCode);
   }
 
