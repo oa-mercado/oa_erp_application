@@ -2065,15 +2065,20 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
       branchCode.isNotEmpty ? EnvConfig.getBranchBaseUrl(branchCode) : ApiConstants.defaultBaseUrl,
     );
 
+    // Dynamically derive a darker shade of the kiosk background color for the card header
+    final baseBgColor = EnvConfig.backgroundColor;
+    final hsl = HSLColor.fromColor(baseBgColor);
+    final headerColor = hsl.withLightness((hsl.lightness * 0.72).clamp(0.12, 0.85)).toColor();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Card Header: Solid Crimson Red background (#D10C15) with Bold White Name
+        // Card Header: Dynamically darkened background matching theme color with Bold White Name
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
-          color: const Color(0xFFD10C15),
+          color: headerColor,
           alignment: Alignment.center,
           child: Text(
             info.name,

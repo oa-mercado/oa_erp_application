@@ -2,7 +2,7 @@ name: oa_erp_application
 description: "OrangeApps ERP RFID Kiosk Application"
 publish_to: 'none'
 
-version: 1.0.3+1
+version: 2.0.0+1
 
 environment:
   sdk: ^3.13.5
