@@ -40,6 +40,18 @@ class RemoteStatusNotifier extends Notifier<AppRemoteStatus> {
 final remoteStatusProvider =
     NotifierProvider<RemoteStatusNotifier, AppRemoteStatus>(RemoteStatusNotifier.new);
 
+/// Tracks whether the user has dismissed the soft-lock dialog to operate in offline mode
+class SoftLockDismissedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void dismiss() => state = true;
+  void reset() => state = false;
+}
+
+final softLockDismissedProvider =
+    NotifierProvider<SoftLockDismissedNotifier, bool>(SoftLockDismissedNotifier.new);
+
 /// Notifier for the active gate (restores last selected gate from Local DB)
 class ActiveGateNotifier extends Notifier<GateModel> {
   @override
@@ -258,6 +270,10 @@ class KioskNotifier extends Notifier<KioskState> {
       final status = await _updateService.fetchRemoteStatus(schoolKey: EnvConfig.schoolBranch);
       if (status != null) {
         ref.read(remoteStatusProvider.notifier).updateStatus(status);
+        // If hard-lock is active or if soft-lock was turned off, reset dismissal
+        if (status.isHardLock || !status.isSoftLock) {
+          ref.read(softLockDismissedProvider.notifier).reset();
+        }
       }
     } catch (_) {}
   }
@@ -566,14 +582,28 @@ class KioskNotifier extends Notifier<KioskState> {
   ///   - Online: Sends scan in background and silently updates Local DB if any info changed (or queues if network drops).
   ///   - Offline: Stores tap (`rfid_code`, `place_id`, timestamp/date, and `stud_entry_tbl` columns) to sync later.
   Future<void> handleRfidTap(String rfidCode) async {
-    // 0. Maintenance & Force-Update Check: if online and maintenance or update is required, ignore tap
+    // 0. Hard-Lock & Soft-Lock Checks
     final remoteStatus = ref.read(remoteStatusProvider);
-    final isOffline = ref.read(isOfflineProvider);
-    if (!isOffline) {
-      if (remoteStatus.maintenance) {
-        debugPrint('[Kiosk] RFID scan ignored: System is under maintenance.');
-        return;
-      }
+    final softLockDismissed = ref.read(softLockDismissedProvider);
+
+    // Hard-lock: NEVER let the user tap under any circumstance
+    if (remoteStatus.isHardLock) {
+      debugPrint('[Kiosk] RFID scan completely blocked: System is under HARD-LOCK.');
+      return;
+    }
+
+    // Soft-lock: blocked until user dismisses dialog to operate in offline mode
+    if (remoteStatus.isSoftLock && !softLockDismissed) {
+      debugPrint('[Kiosk] RFID scan ignored: System is under SOFT-LOCK. Dismiss dialog to operate in offline mode.');
+      return;
+    }
+
+    // Operating mode: if soft-lock was dismissed, force OFFLINE mode
+    final isBaseOffline = ref.read(isOfflineProvider);
+    final isOffline = isBaseOffline || (remoteStatus.isSoftLock && softLockDismissed);
+
+    // Force-Update Check: if online and update is required, ignore tap
+    if (!isBaseOffline && !remoteStatus.isLocked) {
       if (UpdateAndMaintenanceService.isUpdateAvailable(EnvConfig.appVersion, remoteStatus.latestVersion)) {
         debugPrint('[Kiosk] RFID scan ignored: App update is required.');
         return;

@@ -509,13 +509,23 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
   @override
   Widget build(BuildContext context) {
     final activeGate = ref.watch(activeGateProvider);
-    final isOffline = ref.watch(isOfflineProvider);
+    final rawIsOffline = ref.watch(isOfflineProvider);
     final isSyncingRoster = ref.watch(isSyncingRosterProvider);
     final assetProgress = ref.watch(assetSyncProgressProvider);
     final kioskState = ref.watch(kioskScanProvider);
     final remoteStatus = ref.watch(remoteStatusProvider);
+    final softLockDismissed = ref.watch(softLockDismissedProvider);
+
+    // If soft-lock is active and user dismissed the blocker, operate in offline mode
+    final isOperatingSoftLockOffline = remoteStatus.isSoftLock && softLockDismissed;
+    final isOffline = rawIsOffline || isOperatingSoftLockOffline;
+
+    final showHardLock = remoteStatus.isHardLock;
+    final showSoftLock = remoteStatus.isSoftLock && !softLockDismissed;
+    final showMaintenanceBlocker = showHardLock || showSoftLock;
 
     final isUpdateAvailable = !isOffline &&
+        !remoteStatus.isLocked &&
         UpdateAndMaintenanceService.isUpdateAvailable(
           EnvConfig.appVersion,
           remoteStatus.latestVersion,
@@ -1072,13 +1082,13 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                   ),
                 ),
 
-              // Fullscreen Maintenance Mode Blocker (blocks all scanning and interactions)
-              if (remoteStatus.maintenance && !isOffline)
+              // Fullscreen Maintenance Mode Blocker (Hard-Lock & Soft-Lock)
+              if (showMaintenanceBlocker)
                 Container(
                   color: const Color(0xEB000000), // ~92% black
                   alignment: Alignment.center,
                   child: Container(
-                    width: 500,
+                    width: 520,
                     margin: const EdgeInsets.symmetric(horizontal: 24),
                     padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 40),
                     decoration: BoxDecoration(
@@ -1099,24 +1109,27 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           width: 72,
                           height: 72,
                           decoration: BoxDecoration(
-                            color: const Color(0xFFFEF2F2),
+                            color: showHardLock ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB),
                             shape: BoxShape.circle,
-                            border: Border.all(color: const Color(0xFFFECACA), width: 2),
+                            border: Border.all(
+                              color: showHardLock ? const Color(0xFFFECACA) : const Color(0xFFFDE68A),
+                              width: 2,
+                            ),
                           ),
-                          child: const Icon(
-                            Icons.construction,
+                          child: Icon(
+                            showHardLock ? Icons.lock : Icons.warning_amber_rounded,
                             size: 38,
-                            color: Color(0xFFDC2626),
+                            color: showHardLock ? const Color(0xFFDC2626) : const Color(0xFFD97706),
                           ),
                         ),
                         const SizedBox(height: 20),
-                        const Text(
-                          'SYSTEM UNDER MAINTENANCE',
+                        Text(
+                          showHardLock ? 'SYSTEM UNDER HARD-LOCK' : 'SYSTEM UNDER SOFT-LOCK',
                           style: TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
                             letterSpacing: 0.8,
-                            color: Color(0xFF991B1B),
+                            color: showHardLock ? const Color(0xFF991B1B) : const Color(0xFF92400E),
                           ),
                           textAlign: TextAlign.center,
                         ),
@@ -1137,14 +1150,20 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                             color: const Color(0xFFF1F5F9),
                             borderRadius: BorderRadius.circular(6),
                           ),
-                          child: const Row(
+                          child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.block, size: 16, color: Color(0xFF64748B)),
-                              SizedBox(width: 8),
+                              Icon(
+                                showHardLock ? Icons.block : Icons.info_outline,
+                                size: 16,
+                                color: const Color(0xFF64748B),
+                              ),
+                              const SizedBox(width: 8),
                               Text(
-                                'Card scanning is temporarily disabled',
-                                style: TextStyle(
+                                showHardLock
+                                    ? 'Card scanning is completely disabled'
+                                    : 'Online services are temporarily paused',
+                                style: const TextStyle(
                                   fontSize: 12,
                                   color: Color(0xFF475569),
                                   fontWeight: FontWeight.w600,
@@ -1153,6 +1172,34 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                             ],
                           ),
                         ),
+                        if (showSoftLock) ...[
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 48,
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                ref.read(softLockDismissedProvider.notifier).dismiss();
+                              },
+                              icon: const Icon(Icons.wifi_off, color: Colors.white, size: 20),
+                              label: const Text(
+                                'Operate in Offline Mode',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFD97706), // Amber-600
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                elevation: 2,
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

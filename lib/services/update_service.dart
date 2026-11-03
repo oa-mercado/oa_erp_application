@@ -8,25 +8,41 @@ import '../core/config/env_config.dart';
 class AppRemoteStatus {
   final String latestVersion;
   final String minVersion;
-  final bool maintenance;
+  final bool isSoftLock;
+  final bool isHardLock;
   final String maintenanceMessage;
   final String downloadUrl;
 
   const AppRemoteStatus({
     this.latestVersion = '',
     this.minVersion = '',
-    this.maintenance = false,
-    this.maintenanceMessage = 'System is currently undergoing scheduled maintenance. Please wait or contact administrator.',
+    this.isSoftLock = false,
+    this.isHardLock = false,
+    this.maintenanceMessage =
+        'System is currently undergoing scheduled maintenance. Please wait or contact administrator.',
     this.downloadUrl = '',
   });
 
+  /// True if either hard-lock or soft-lock is active
+  bool get maintenance => isHardLock || isSoftLock;
+  bool get isLocked => isHardLock || isSoftLock;
+
   factory AppRemoteStatus.fromJson(Map<String, dynamic> json) {
+    bool parseBool(dynamic val) {
+      if (val == null) return false;
+      if (val is bool) return val;
+      final str = val.toString().trim().toLowerCase();
+      return str == 'true' || str == '1';
+    }
+
+    final hard = parseBool(json['hard-lock'] ?? json['hard_lock'] ?? json['hardLock']);
+    final soft = parseBool(json['soft-lock'] ?? json['soft_lock'] ?? json['softLock']);
+
     return AppRemoteStatus(
       latestVersion: json['latest_version']?.toString() ?? '',
       minVersion: json['min_version']?.toString() ?? '',
-      maintenance: json['maintenance'] == true ||
-          json['maintenance']?.toString().toLowerCase() == 'true' ||
-          json['maintenance'] == 1,
+      isSoftLock: soft,
+      isHardLock: hard,
       maintenanceMessage: json['maintenance_message']?.toString() ??
           'System is currently undergoing scheduled maintenance. Please wait or contact administrator.',
       downloadUrl: json['download_url']?.toString() ?? '',
