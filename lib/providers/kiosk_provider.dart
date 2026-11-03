@@ -206,6 +206,8 @@ class KioskNotifier extends Notifier<KioskState> {
       // Clear out any old invalid / permanently rejected taps from local DB
       _localDb.clearFailedOrInvalidTaps();
       ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
+      // Verify connectivity immediately on launch
+      await _checkConnectivity();
       // Sync authoritative server clock
       unawaited(_apiService.fetchServerTime());
       // Cache all gates from server into SQLite so gate selection works offline
@@ -278,8 +280,10 @@ class KioskNotifier extends Notifier<KioskState> {
     } catch (_) {}
   }
 
-  Future<void> _checkConnectivity() async {
-    if (_isCheckingConnectivity) return;
+  Future<bool> checkConnectivity({bool forceSync = false}) async {
+    if (_isCheckingConnectivity && !forceSync) {
+      return !ref.read(isOfflineProvider);
+    }
     _isCheckingConnectivity = true;
     try {
       final isReachable = await _apiService.checkConnectivity();
@@ -299,24 +303,33 @@ class KioskNotifier extends Notifier<KioskState> {
       final remoteStatus = ref.read(remoteStatusProvider);
       if (remoteStatus.maintenance) {
         debugPrint('[Kiosk] Maintenance active. Postponing offline sync.');
-        return;
+        return !currentlyOffline;
       }
 
       // Automatically flush offline queue whenever online and pending records exist
       if (!currentlyOffline && _localDb.unsyncedCount > 0) {
-        await syncOfflineQueue();
+        unawaited(syncOfflineQueue(force: forceSync));
       }
 
-      // If we just reconnected to the internet and haven't synced the roster yet, sync it now
-      if (!currentlyOffline && wasOffline) {
-        unawaited(syncGatesFromServer());
-        unawaited(syncRosterFromServer());
+      // If we just reconnected OR if local caches (gates / roster) are still empty while online, sync them now
+      final needsGates = _localDb.getCachedGates().isEmpty;
+      final needsRoster = _localDb.cachedRosterCount == 0;
+      if (!currentlyOffline && (wasOffline || forceSync || needsGates || needsRoster)) {
+        if (wasOffline || forceSync || needsGates) {
+          unawaited(syncGatesFromServer());
+        }
+        if (wasOffline || forceSync || needsRoster) {
+          unawaited(syncRosterFromServer());
+        }
         unawaited(syncAllPendingAssets());
       }
+      return !currentlyOffline;
     } finally {
       _isCheckingConnectivity = false;
     }
   }
+
+  Future<void> _checkConnectivity() => checkConnectivity();
 
   /// Fetches all gates from the server and caches them in SQLite `gates_cache`
   /// so the operator can still select/change gates while offline.
@@ -325,6 +338,7 @@ class KioskNotifier extends Notifier<KioskState> {
       await _apiService.ensureSessionAndFetchLogo();
       final gates = await _apiService.fetchGates();
       if (gates.isNotEmpty) {
+        ref.read(isOfflineProvider.notifier).setOffline(false);
         _localDb.saveGatesList(gates);
         final currentGate = ref.read(activeGateProvider);
         GateModel? matching;
@@ -371,6 +385,7 @@ class KioskNotifier extends Notifier<KioskState> {
       debugPrint('[Kiosk] Requesting full student & employee roster for branch "$branchCode"...');
       final profiles = await _apiService.fetchKioskRoster(branchCode: branchCode);
       if (profiles.isNotEmpty) {
+        ref.read(isOfflineProvider.notifier).setOffline(false);
         savedCount = _localDb.bulkUpsertRoster(profiles, branchCode: branchCode);
         _lastSyncedBranch = branchCode;
         // Clear any stale RFID-based in-memory debounce maps so reassigned RFIDs work immediately
