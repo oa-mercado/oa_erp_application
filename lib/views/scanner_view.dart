@@ -835,7 +835,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     final isSsaManila = branchCode == 'ssamanila' || branchCode == 'sscmanila';
 
     return Scaffold(
-      backgroundColor: EnvConfig.backgroundColor,
+      backgroundColor: isSsaManila ? const Color(0xFF083980) : EnvConfig.backgroundColor,
       body: Focus(
         focusNode: _focusNode,
         autofocus: true,
@@ -1011,7 +1011,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
               // DETERMINISTIC FLOATING CARD STACK (Push-Left & Stacking)
               if (kioskState.hasActiveCards)
                 Container(
-                  color: Colors.black54,
+                  color: isSsaManila ? Colors.transparent : Colors.black54,
                   alignment: Alignment.center,
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
@@ -1027,7 +1027,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                             _buildAnimatedKioskCard(
                               card: kioskState.activeCards[i],
                               isPrevious: i < kioskState.activeCards.length - 1,
-                              branchCode: activeGate.branchCode,
+                              branchCode: branchCode,
                             ),
                           ],
                         ],
@@ -1367,27 +1367,29 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     required bool isPrevious,
     required String branchCode,
   }) {
-    final isSsaManila = branchCode.toLowerCase().trim() == 'ssamanila' ||
-        branchCode.toLowerCase().trim() == 'sscmanila';
+    final effectiveBranch = (branchCode.isNotEmpty ? branchCode : EnvConfig.defaultBranch)
+        .toLowerCase()
+        .trim();
+    final isSsaManila = effectiveBranch == 'ssamanila' || effectiveBranch == 'sscmanila';
 
     if (isSsaManila) {
-      // SSC Manila Web Replicating Card Style (Sharp borders, exact proportions matching web)
+      // SSC Manila Web Replicating Card Style (Sharp borders, wide proportions matching web kiosk)
       return Container(
         key: ValueKey('kiosk_card_${card.id}'),
-        width: 720.0,
+        width: 1000.0,
         decoration: BoxDecoration(
           color: Colors.white,
-          border: Border.all(color: const Color(0xFFDCDFE6), width: 1),
+          border: Border.all(color: const Color(0xFFDCDFE6), width: 1.5),
           boxShadow: const [
             BoxShadow(
               color: Colors.black26,
-              blurRadius: 16,
-              offset: Offset(0, 6),
+              blurRadius: 24,
+              offset: Offset(0, 8),
             ),
           ],
         ),
         clipBehavior: Clip.antiAlias,
-        child: _buildFullCardContent(card, branchCode),
+        child: _buildFullCardContent(card, effectiveBranch),
       );
     }
 
@@ -1691,11 +1693,14 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
 
   /// Full Card Content when active and prominent
   Widget _buildFullCardContent(ActiveKioskCard card, String branchCode) {
+    final effectiveBranch = (branchCode.isNotEmpty ? branchCode : EnvConfig.defaultBranch)
+        .toLowerCase()
+        .trim();
     if (card.isProcessing) {
       return _buildProcessingContent(card.scannedAt);
     }
     if (card.isSuccess && card.studentInfo != null) {
-      return _buildStudentCardContent(card.studentInfo!, card.scannedAt, branchCode);
+      return _buildStudentCardContent(card.studentInfo!, card.scannedAt, effectiveBranch);
     }
     if (card.isCooldown) {
       return _buildCooldownContent(card.cooldownSecondsRemaining ?? 15, card.scannedAt);
@@ -2065,28 +2070,37 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
       branchCode.isNotEmpty ? EnvConfig.getBranchBaseUrl(branchCode) : ApiConstants.defaultBaseUrl,
     );
 
-    // Dynamically derive a darker shade of the kiosk background color for the card header
-    final baseBgColor = EnvConfig.backgroundColor;
+    // Dynamic darker shade of the blue theme background (#083980).
+    // The web kiosk page can report sch_color (which in SSC Manila is red/maroon).
+    // The user explicitly requested the card header to be dark blue (darker than the background),
+    // and never red. If EnvConfig.backgroundColor is reddish, we fallback to #083980.
+    Color baseBgColor = EnvConfig.backgroundColor;
     final hsl = HSLColor.fromColor(baseBgColor);
-    final headerColor = hsl.withLightness((hsl.lightness * 0.72).clamp(0.12, 0.85)).toColor();
+    final isReddish = (hsl.hue < 45 || hsl.hue > 320) && hsl.saturation > 0.15;
+    if (isReddish) {
+      baseBgColor = const Color(0xFF083980);
+    }
+    final darkHsl = HSLColor.fromColor(baseBgColor);
+    // Darker shade than the background (rich solid navy blue)
+    final headerColor = darkHsl.withLightness((darkHsl.lightness * 0.60).clamp(0.08, 0.30)).toColor();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Card Header: Dynamically darkened background matching theme color with Bold White Name
+        // Card Header: Dynamically darkened blue background matching theme with Bold White Name
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 28),
           color: headerColor,
           alignment: Alignment.center,
           child: Text(
             info.name,
             style: const TextStyle(
               color: Colors.white,
-              fontSize: 22,
+              fontSize: 28,
               fontWeight: FontWeight.bold,
-              letterSpacing: 0.3,
+              letterSpacing: 0.5,
             ),
             textAlign: TextAlign.center,
             maxLines: 2,
@@ -2094,33 +2108,32 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
           ),
         ),
 
-        // Card Body: Clean white background
+        // Card Body: Clean white background matching web 2-column row layout (Avatar Left, Details Right)
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          padding: const EdgeInsets.fromLTRB(54, 30, 54, 20),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Top Centered 200x200 Avatar
-              Center(
-                child: ClipOval(
-                  child: Container(
-                    width: 180,
-                    height: 180,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
-                    ),
-                    child: _buildStudentAvatarImage(info, fullImageUrl, 180),
+              // Left Column: 220x220 Circular Avatar
+              ClipOval(
+                child: Container(
+                  width: 220,
+                  height: 220,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
                   ),
+                  child: _buildStudentAvatarImage(info, fullImageUrl, 220),
                 ),
               ),
-              const SizedBox(height: 20),
 
-              // Left-aligned Details with text-muted labels
-              Padding(
-                padding: const EdgeInsets.only(left: 36.0),
+              const SizedBox(width: 50),
+
+              // Right Column: Student Details matching web typography
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     // Student / Employee ID
                     RichText(
@@ -2129,7 +2142,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           TextSpan(
                             text: idLabel,
                             style: const TextStyle(
-                              fontSize: 19,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF6C757D), // Bootstrap text-muted
                             ),
@@ -2137,7 +2150,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           TextSpan(
                             text: info.personId.isNotEmpty ? info.personId : 'N/A',
                             style: const TextStyle(
-                              fontSize: 20,
+                              fontSize: 28,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF212529),
                             ),
@@ -2145,7 +2158,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 14),
 
                     // DATE
                     RichText(
@@ -2154,7 +2167,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           const TextSpan(
                             text: 'DATE : ',
                             style: TextStyle(
-                              fontSize: 19,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF6C757D),
                             ),
@@ -2162,7 +2175,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           TextSpan(
                             text: info.date ?? _formatDate(scannedAt),
                             style: const TextStyle(
-                              fontSize: 19,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF212529),
                             ),
@@ -2170,7 +2183,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 14),
 
                     // TIME
                     RichText(
@@ -2179,7 +2192,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           const TextSpan(
                             text: 'TIME : ',
                             style: TextStyle(
-                              fontSize: 19,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF6C757D),
                             ),
@@ -2187,7 +2200,7 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                           TextSpan(
                             text: info.time ?? _formatTime(scannedAt),
                             style: const TextStyle(
-                              fontSize: 19,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF212529),
                             ),
@@ -2198,28 +2211,32 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                   ],
                 ),
               ),
+            ],
+          ),
+        ),
 
-              const SizedBox(height: 20),
-
-              // Bottom Powered by OrangeApps (exact powered.png from web)
-              Center(
-                child: Image.asset(
-                  'assets/images/powered.png',
-                  height: 32,
-                  fit: BoxFit.contain,
-                  errorBuilder: (ctx, err, stack) => Image.asset(
-                    'assets/images/oa.png',
-                    height: 32,
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, _, _) => const Text(
-                      'Powered by OrangeApps',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-                    ),
+        // Card Footer: Powered by OrangeApps logo matching web version
+        Padding(
+          padding: const EdgeInsets.only(bottom: 24.0, top: 8.0),
+          child: Center(
+            child: Image.asset(
+              'assets/images/powered.png',
+              height: 44,
+              fit: BoxFit.contain,
+              errorBuilder: (ctx, err, stack) => Image.asset(
+                'assets/images/oa.png',
+                height: 44,
+                fit: BoxFit.contain,
+                errorBuilder: (_, _, _) => const Text(
+                  'Powered by OrangeApps',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF6C757D),
                   ),
                 ),
               ),
-              const SizedBox(height: 8),
-            ],
+            ),
           ),
         ),
       ],
