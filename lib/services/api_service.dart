@@ -530,21 +530,41 @@ class ApiService {
 
   Future<ScanResponseModel> _executeSendRfidScan(ScanRecordModel scan) async {
     final endpoint = ApiConstants.saveRfidEntryEndpoint;
-    final payloadMap = scan.toErpPayload().map((k, v) => MapEntry(k, v.toString()));
+    final isStudentEntry = endpoint.contains('student_entry');
+
+    final dynamic body;
+    final String contentType;
+
+    if (isStudentEntry) {
+      // Matches the web kiosk axios.post JSON payload exactly on schooltesterp
+      final webPayload = <String, dynamic>{
+        'place_name': scan.placeName,
+        'place_id': '${scan.placeId}',
+        'branch_code': scan.branchCode,
+        'rfid_code': scan.rfidCode,
+        if (scan.enterAt.isNotEmpty)
+          'enter_at': scan.enterAt,
+      };
+      body = jsonEncode(webPayload);
+      contentType = 'application/json';
+    } else {
+      body = scan.toErpPayload().map((k, v) => MapEntry(k, v.toString()));
+      contentType = 'application/x-www-form-urlencoded';
+    }
 
     // ignore: avoid_print
     print('[ApiService RFID Tap] POST $endpoint');
     // ignore: avoid_print
     print('[ApiService RFID Tap] Full URL: $_baseUrl$endpoint');
     // ignore: avoid_print
-    print('[ApiService RFID Tap] Headers: Content-Type: application/x-www-form-urlencoded');
+    print('[ApiService RFID Tap] Headers: Content-Type: $contentType');
     // ignore: avoid_print
-    print('[ApiService RFID Tap] Payload: $payloadMap');
+    print('[ApiService RFID Tap] Payload: $body');
 
     final response = await _postWithFallback(
       endpoint,
-      body: payloadMap,
-      contentType: 'application/x-www-form-urlencoded',
+      body: body,
+      contentType: contentType,
       timeout: const Duration(seconds: 15),
       requiresCsrf: false,
     );
