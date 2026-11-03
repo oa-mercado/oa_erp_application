@@ -1251,8 +1251,8 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
                   ),
                 ),
 
-              // Fullscreen Maintenance Mode Blocker (blocks all scanning and interactions)
-              if (remoteStatus.maintenance && !isOffline)
+              // Fullscreen Maintenance Mode Blocker (blocks all scanning and interactions completely)
+              if (remoteStatus.maintenance)
                 Container(
                   color: const Color(0xEB000000), // ~92% black
                   alignment: Alignment.center,

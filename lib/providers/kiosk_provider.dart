@@ -566,14 +566,16 @@ class KioskNotifier extends Notifier<KioskState> {
   ///   - Online: Sends scan in background and silently updates Local DB if any info changed (or queues if network drops).
   ///   - Offline: Stores tap (`rfid_code`, `place_id`, timestamp/date, and `stud_entry_tbl` columns) to sync later.
   Future<void> handleRfidTap(String rfidCode) async {
-    // 0. Maintenance & Force-Update Check: if online and maintenance or update is required, ignore tap
+    // 0. Maintenance Check: if maintenance is active, completely block all scanning under all circumstances!
     final remoteStatus = ref.read(remoteStatusProvider);
+    if (remoteStatus.maintenance) {
+      debugPrint('[Kiosk] RFID scan completely blocked: System is under maintenance.');
+      return;
+    }
+
+    // Force-Update Check: if online and update is required, ignore tap
     final isOffline = ref.read(isOfflineProvider);
     if (!isOffline) {
-      if (remoteStatus.maintenance) {
-        debugPrint('[Kiosk] RFID scan ignored: System is under maintenance.');
-        return;
-      }
       if (UpdateAndMaintenanceService.isUpdateAvailable(EnvConfig.appVersion, remoteStatus.latestVersion)) {
         debugPrint('[Kiosk] RFID scan ignored: App update is required.');
         return;
