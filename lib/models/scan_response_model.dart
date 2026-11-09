@@ -1,3 +1,5 @@
+import 'hris_attendance_models.dart';
+
 /// Represents student or employee details returned by the ERP or loaded from the Local DB.
 class StudentInfoModel {
   final String name;
@@ -114,6 +116,7 @@ class ScanResponseModel {
   final int isCommuter;
   final int tapOnInterval;
   final StudentInfoModel? studentInfo;
+  final HrisTapResponse? hrisResponse;
 
   ScanResponseModel({
     required this.isSuccess,
@@ -125,6 +128,7 @@ class ScanResponseModel {
     this.isCommuter = 0,
     this.tapOnInterval = 0,
     this.studentInfo,
+    this.hrisResponse,
   });
 
   /// True when the server indicates this scan occurred within the tap interval (already entered/recorded).
@@ -201,6 +205,42 @@ class ScanResponseModel {
               isCommuter: commuterVal,
             )
           : null,
+    );
+  }
+
+  factory ScanResponseModel.fromHrisTapResponse(
+    HrisTapResponse hris, {
+    required String hrisBaseUrl,
+    String? date,
+  }) {
+    if (hris.isNetworkError) {
+      return ScanResponseModel.networkError(
+        hris.logMessage ?? 'Connection Error',
+        httpStatusCode: hris.httpStatusCode,
+      );
+    }
+
+    final emp = hris.employee;
+    final info = emp?.toStudentInfoModel(
+      hrisBaseUrl: hrisBaseUrl,
+      attendanceType: hris.attendanceType ?? hris.logVoicePrompt,
+      date: date,
+      time: hris.timeNow,
+    );
+
+    // Valid employee found on server -> processed deterministically (not a transient failure)
+    final isProcessedSuccess = hris.isHttpSuccess && emp != null;
+
+    return ScanResponseModel(
+      isSuccess: isProcessedSuccess,
+      isNetworkError: false,
+      httpStatusCode: hris.httpStatusCode,
+      message: hris.logMessage,
+      title: emp != null ? emp.fullName : 'Invalid ID',
+      status: isProcessedSuccess ? 1 : 0,
+      tapOnInterval: hris.showIntervalPrompt ? 1 : 0,
+      studentInfo: info,
+      hrisResponse: hris,
     );
   }
 

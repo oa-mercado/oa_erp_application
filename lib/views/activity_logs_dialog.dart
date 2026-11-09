@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/config/env_config.dart';
 import '../models/scan_record_model.dart';
+import '../providers/hris_attendance_provider.dart';
 import '../providers/kiosk_provider.dart';
 
 /// Modal dialog displaying recent RFID tap activity logs stored in `stud_entry_tbl`.
@@ -159,13 +161,24 @@ class _ActivityLogsDialogState extends ConsumerState<ActivityLogsDialog> {
                           : () async {
                               setState(() => _isSyncingNow = true);
                               try {
-                                final notifier = ref.read(kioskScanProvider.notifier);
-                                final isOnline = await notifier.checkConnectivity(
-                                  forceSync: true,
-                                  onlySyncQueue: true,
-                                );
-                                if (isOnline) {
-                                  await notifier.syncOfflineQueue(force: true);
+                                if (EnvConfig.isHrisMode) {
+                                  final hrisNotifier = ref.read(hrisAttendanceProvider.notifier);
+                                  final isOnline = await hrisNotifier.checkConnectivity(
+                                    forceSync: true,
+                                    onlySyncQueue: true,
+                                  );
+                                  if (isOnline) {
+                                    await hrisNotifier.syncOfflineQueue(force: true);
+                                  }
+                                } else {
+                                  final notifier = ref.read(kioskScanProvider.notifier);
+                                  final isOnline = await notifier.checkConnectivity(
+                                    forceSync: true,
+                                    onlySyncQueue: true,
+                                  );
+                                  if (isOnline) {
+                                    await notifier.syncOfflineQueue(force: true);
+                                  }
                                 }
                               } finally {
                                 if (mounted) {

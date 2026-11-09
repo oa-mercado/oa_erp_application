@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 import 'core/config/env_config.dart';
+import 'views/hris_attendance_view.dart';
 import 'views/scanner_view.dart';
 
 /// Custom HttpOverrides to handle OrangeApps ERP servers (e.g. dominicanstarosaerp.orangeapps.ph)
@@ -67,7 +68,7 @@ class OrangeAppsRfidApp extends StatelessWidget {
         ),
         fontFamily: 'Segoe UI',
       ),
-      home: const ScannerView(),
+      home: EnvConfig.isHrisMode ? const HrisAttendanceShell() : const ScannerView(),
     );
   }
 }

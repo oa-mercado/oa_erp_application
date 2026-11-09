@@ -197,10 +197,39 @@ class EnvConfig {
     return 'https://storage.googleapis.com/hrpai/background_images/1228854_1228854';
   }
 
-  /// Configurable RFID tap endpoint from .env (`student_entry` or `save_rfid_entry`)
+  static String _toHrisUrl(String rawUrl) {
+    final clean = _normalizeUrl(rawUrl);
+    if (clean.isEmpty) return 'https://schooltesterp.orangeapps.ph/hris';
+    if (clean.toLowerCase().endsWith('/hris')) return clean;
+    if (clean.toLowerCase().endsWith('/qr')) {
+      return '${clean.substring(0, clean.length - 3)}/hris';
+    }
+    return '$clean/hris';
+  }
+
+  /// Active HRIS Base URL (always resolves to `/hris` path)
+  static String get hrisBaseUrl => _toHrisUrl(baseUrl);
+
+  /// Debug HRIS Base URL (`http://localhost/hris`)
+  static String get debugHrisBaseUrl =>
+      _toHrisUrl(get('DEBUG_BASE_URL', defaultValue: 'http://localhost/hris'));
+
+  /// Release HRIS Base URL (from `RELEASE_BASE_URL` in `.env`, e.g. `https://schooltesterp.orangeapps.ph/hris`)
+  static String get releaseHrisBaseUrl =>
+      _toHrisUrl(get('RELEASE_BASE_URL', defaultValue: 'https://schooltesterp.orangeapps.ph/hris'));
+
+  /// True when the app is configured as the HRIS Employee Attendance Kiosk
+  static bool get isHrisMode {
+    final ep = tapEndpoint.toLowerCase();
+    return ep.contains('submit_attendance') ||
+        get('RELEASE_BASE_URL').toLowerCase().contains('/hris') ||
+        get('DEBUG_BASE_URL').toLowerCase().contains('/hris');
+  }
+
+  /// Configurable RFID tap endpoint from .env (`submit_attendance_by_id`, `student_entry`, or `save_rfid_entry`)
   static String get tapEndpoint {
-    final raw = get('TAP_ENDPOINT', defaultValue: '/student_entry').trim();
-    if (raw.isEmpty) return '/student_entry';
+    final raw = get('TAP_ENDPOINT', defaultValue: '/submit_attendance_by_id').trim();
+    if (raw.isEmpty) return '/submit_attendance_by_id';
     if (raw == 'student_rfid_entry') return '/save_rfid_entry';
     return raw.startsWith('/') ? raw : '/$raw';
   }

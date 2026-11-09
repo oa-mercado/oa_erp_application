@@ -31,4 +31,14 @@ class ApiConstants {
 
   /// Endpoint for fetching accurate server wall-clock time (`YYYY-MM-DD HH:mm:ss`)
   static const String serverTimeEndpoint = '/server-time';
+
+  // --- HRIS Online Attendance Portal Endpoints ---
+  static const String hrisOnlineAttendanceEndpoint = '/online_attendance';
+  static const String hrisAttendancePasscodeEndpoint = '/attendance/passcode';
+  static const String hrisSubmitAttendanceByIdEndpoint = '/submit_attendance_by_id';
+  static const String hrisSubmitAttendanceByJsonEndpoint = '/submit_attendance_by_json';
+  static const String hrisCheckSettingsEndpoint = '/check_settings';
+  static const String hrisCheckConnectionEndpoint = '/check_connection';
+  static const String hrisTimeInTodayEndpoint = '/time_in_today';
+  static const String hrisAttendanceLogsTodayEndpoint = '/attendance_logs_today';
 }

@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import '../core/config/env_config.dart';
 import '../models/gate_model.dart';
+import '../models/hris_attendance_models.dart';
 import '../models/scan_record_model.dart';
 import '../models/scan_response_model.dart';
 
@@ -157,7 +158,9 @@ class LocalDbService {
   static String get _dataDirPath {
     if (_resolvedDataDirPath != null) return _resolvedDataDirPath!;
 
-    final branch = EnvConfig.defaultBranch.isNotEmpty ? EnvConfig.defaultBranch.toLowerCase().trim() : 'default';
+    final branch = EnvConfig.isHrisMode
+        ? 'hris_${EnvConfig.schoolBranch}'
+        : (EnvConfig.defaultBranch.isNotEmpty ? EnvConfig.defaultBranch.toLowerCase().trim() : 'default');
 
     // 1. Check if relative `local_db` is writable (development / portable mode outside Program Files)
     if (!Platform.resolvedExecutable.toLowerCase().contains('program files')) {
@@ -1705,6 +1708,122 @@ class LocalDbService {
     final h = dt.hour > 12 ? dt.hour - 12 : (dt.hour == 0 ? 12 : dt.hour);
     final period = dt.hour >= 12 ? 'PM' : 'AM';
     final m = dt.minute.toString().padLeft(2, '0');
-    return '${h.toString().padLeft(2, '0')}:$m $period';
+    final hh = h.toString().padLeft(2, '0');
+    return '$hh:$m $period';
+  }
+
+  // =========================================================================
+  // HRIS Portal Settings, Passcode State & Cookie Persistence
+  // =========================================================================
+
+  String? getSetting(String key) {
+    try {
+      final rows = _database.select(
+        'SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1;',
+        [key],
+      );
+      if (rows.isEmpty) return null;
+      return rows.first['setting_value']?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void setSetting(String key, String value) {
+    try {
+      _database.execute(
+        'INSERT OR REPLACE INTO app_settings (setting_key, setting_value) VALUES (?, ?);',
+        [key, value],
+      );
+    } catch (_) {}
+  }
+
+  void deleteSetting(String key) {
+    try {
+      _database.execute('DELETE FROM app_settings WHERE setting_key = ?;', [key]);
+    } catch (_) {}
+  }
+
+  void saveHrisPortalConfig(HrisPortalConfig config, {required String originKey}) {
+    try {
+      setSetting('hris_portal_config_$originKey', jsonEncode(config.toJson()));
+    } catch (_) {}
+  }
+
+  HrisPortalConfig? getHrisPortalConfig({required String originKey}) {
+    try {
+      final raw = getSetting('hris_portal_config_$originKey');
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return HrisPortalConfig.fromJson(Map<String, dynamic>.from(decoded));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  void saveHrisCookies(Map<String, String> cookies, {required String originKey}) {
+    try {
+      setSetting('hris_cookies_$originKey', jsonEncode(cookies));
+    } catch (_) {}
+  }
+
+  Map<String, String> getHrisCookies({required String originKey}) {
+    try {
+      final raw = getSetting('hris_cookies_$originKey');
+      if (raw == null || raw.isEmpty) return {};
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return decoded.map((k, v) => MapEntry(k.toString(), v.toString()));
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  void setHrisPasscodeMetadata({
+    required String originKey,
+    bool? requiresPasscode,
+    bool? isUnlocked,
+  }) {
+    if (requiresPasscode != null) {
+      setSetting('hris_requires_passcode_$originKey', requiresPasscode ? '1' : '0');
+    }
+    if (isUnlocked != null) {
+      setSetting('hris_unlocked_$originKey', isUnlocked ? '1' : '0');
+    }
+  }
+
+  ({bool? requiresPasscode, bool isUnlocked}) getHrisPasscodeMetadata({required String originKey}) {
+    final reqRaw = getSetting('hris_requires_passcode_$originKey');
+    final unlRaw = getSetting('hris_unlocked_$originKey');
+    return (
+      requiresPasscode: reqRaw == null ? null : reqRaw == '1',
+      isUnlocked: unlRaw == '1',
+    );
+  }
+
+  /// Downloads and caches the HRIS portal background image locally for offline rendering
+  Future<String?> downloadAndCacheHrisBgImage(String imageUrl) async {
+    if (imageUrl.trim().isEmpty) return null;
+    try {
+      final uri = Uri.parse(imageUrl.trim());
+      final response = await _imageHttpClient.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+        final ext = p.extension(uri.path).isNotEmpty ? p.extension(uri.path) : '.png';
+        final destFile = File(p.join(_imagesDir.path, 'hris_portal_bg$ext'));
+        await destFile.writeAsBytes(response.bodyBytes, flush: true);
+        setSetting('hris_cached_bg_path', destFile.path);
+        return destFile.path;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  String? getCachedHrisBgImagePath() {
+    final saved = getSetting('hris_cached_bg_path');
+    if (saved != null && saved.isNotEmpty && File(saved).existsSync()) {
+      return saved;
+    }
+    return null;
   }
 }

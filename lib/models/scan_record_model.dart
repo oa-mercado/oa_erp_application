@@ -90,6 +90,35 @@ class ScanRecordModel {
         'from_desktop_app': 1,
       };
 
+  /// Payload sent to HRIS `POST /submit_attendance_by_id` (preserves original `date_now` & `time_now`)
+  Map<String, dynamic> toHrisPayload({
+    int timeInType = 2,
+    int isRestricted = 1,
+    String attendanceType = '',
+  }) {
+    final parts = enterAt.trim().split(' ');
+    final datePart = parts.isNotEmpty && parts[0].length == 10
+        ? parts[0]
+        : '${scannedAt.year.toString().padLeft(4, '0')}-${scannedAt.month.toString().padLeft(2, '0')}-${scannedAt.day.toString().padLeft(2, '0')}';
+    final timePart = parts.length > 1 && parts[1].isNotEmpty
+        ? parts[1]
+        : '${scannedAt.hour.toString().padLeft(2, '0')}:${scannedAt.minute.toString().padLeft(2, '0')}:${scannedAt.second.toString().padLeft(2, '0')}';
+
+    // If scanned value contains comma (QR code format), use time_in_type = 1; otherwise use configured timeInType
+    final effectiveTimeInType = rfidCode.contains(',') ? 1 : timeInType;
+
+    return {
+      'uuid': uuid,
+      'date_now': datePart,
+      'time_now': timePart,
+      'time_in_type': effectiveTimeInType,
+      'employee': rfidCode,
+      'attendance_type': attendanceType,
+      'is_restricted': isRestricted,
+      'from_desktop_app': 1,
+    };
+  }
+
   /// Full stud_entry_tbl JSON representation stored in the Local DB
   Map<String, dynamic> toJson() => {
         'uuid': uuid,

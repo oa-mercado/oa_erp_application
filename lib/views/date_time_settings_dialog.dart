@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/config/env_config.dart';
+import '../providers/hris_attendance_provider.dart';
 import '../providers/kiosk_provider.dart';
 
 /// Live-ticking clickable Date & Time pill displayed on the Kiosk main screen.
@@ -159,12 +161,14 @@ class _DateTimeSettingsDialogState extends ConsumerState<DateTimeSettingsDialog>
   @override
   void initState() {
     super.initState();
-    // Pause background RFID scanner while dialog is open
-    try {
-      final listener = ref.read(kioskProvider.notifier).listener;
-      listener.isPaused = true;
-      listener.clearBuffer();
-    } catch (_) {}
+    // Pause background RFID scanner while dialog is open (student kiosk mode only)
+    if (!EnvConfig.isHrisMode) {
+      try {
+        final listener = ref.read(kioskProvider.notifier).listener;
+        listener.isPaused = true;
+        listener.clearBuffer();
+      } catch (_) {}
+    }
 
     _loadFromCurrentKioskTime();
 
@@ -187,11 +191,13 @@ class _DateTimeSettingsDialogState extends ConsumerState<DateTimeSettingsDialog>
   @override
   void dispose() {
     _livePreviewTimer?.cancel();
-    try {
-      final listener = ref.read(kioskProvider.notifier).listener;
-      listener.isPaused = false;
-      listener.clearBuffer();
-    } catch (_) {}
+    if (!EnvConfig.isHrisMode) {
+      try {
+        final listener = ref.read(kioskProvider.notifier).listener;
+        listener.isPaused = false;
+        listener.clearBuffer();
+      } catch (_) {}
+    }
     super.dispose();
   }
 
@@ -252,7 +258,9 @@ class _DateTimeSettingsDialogState extends ConsumerState<DateTimeSettingsDialog>
       _statusMessage = null;
     });
 
-    final ok = await ref.read(kioskProvider.notifier).syncTimeWithServer();
+    final ok = EnvConfig.isHrisMode
+        ? await ref.read(hrisAttendanceProvider.notifier).syncTimeWithServer()
+        : await ref.read(kioskProvider.notifier).syncTimeWithServer();
     if (!mounted) return;
 
     setState(() {
@@ -270,7 +278,11 @@ class _DateTimeSettingsDialogState extends ConsumerState<DateTimeSettingsDialog>
 
   void _handleSaveManualTime() {
     final target = _buildSelectedDateTime();
-    ref.read(kioskProvider.notifier).setManualKioskTime(target);
+    if (EnvConfig.isHrisMode) {
+      ref.read(hrisAttendanceProvider.notifier).setManualKioskTime(target);
+    } else {
+      ref.read(kioskProvider.notifier).setManualKioskTime(target);
+    }
     Navigator.of(context).pop(true);
   }
 

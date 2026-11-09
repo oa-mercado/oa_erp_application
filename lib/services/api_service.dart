@@ -8,6 +8,7 @@ import '../core/config/env_config.dart';
 import '../core/constants/api_constants.dart';
 import '../models/branch_model.dart';
 import '../models/gate_model.dart';
+import '../models/hris_attendance_models.dart';
 import '../models/scan_record_model.dart';
 import '../models/scan_response_model.dart';
 import 'local_db_service.dart';
@@ -156,15 +157,24 @@ class ApiService {
   /// Callback invoked whenever a low-latency server response provides an authoritative Date & Time
   static void Function(DateTime serverTime)? onServerTimeReceived;
 
+  /// Callback invoked whenever cookies change (so HRIS `attendance_unlocked` persists across restarts)
+  static void Function(String originUrl, Map<String, String> cookies)? onCookiesChanged;
+
   // Shared session state across ApiService instances for the current base URL
   static String? _sessionBaseUrl;
   static final Map<String, String> _cookies = {};
   static String? _xsrfToken;
   static String? _cachedSchoolLogoUrl;
 
+  /// Active HRIS tap configuration synced from `GET /online_attendance` & `POST /check_settings`
+  static int hrisTimeInType = 2;
+  static int hrisIsRestricted = 1;
+
   ApiService({
     String? baseUrl,
-  }) : _baseUrl = _normalizeBaseUrl(baseUrl ?? ApiConstants.defaultBaseUrl);
+  }) : _baseUrl = _normalizeBaseUrl(
+          baseUrl ?? (EnvConfig.isHrisMode ? EnvConfig.hrisBaseUrl : ApiConstants.defaultBaseUrl),
+        );
 
   static String _normalizeBaseUrl(String url) {
     var trimmed = url.trim();
@@ -175,6 +185,29 @@ class ApiService {
   }
 
   String get baseUrl => _baseUrl;
+
+  /// Restores persisted cookies from SQLite (e.g. `attendance_unlocked`) before probing `/online_attendance`
+  void restoreCookies(Map<String, String> savedCookies, String originUrl) {
+    if (savedCookies.isEmpty) return;
+    _sessionBaseUrl = _normalizeBaseUrl(originUrl);
+    _cookies.addAll(savedCookies);
+    final rawXsrf = _cookies['XSRF-TOKEN'] ?? _cookies['xsrf-token'];
+    if (rawXsrf != null && rawXsrf.isNotEmpty) {
+      try {
+        _xsrfToken = Uri.decodeComponent(rawXsrf);
+      } catch (_) {
+        _xsrfToken = rawXsrf;
+      }
+    }
+  }
+
+  /// Clears the `attendance_unlocked` cookie (allowing manual re-lock of passcode screen)
+  void clearPasscodeCookie() {
+    _cookies.remove('attendance_unlocked');
+    if (_sessionBaseUrl != null) {
+      onCookiesChanged?.call(_sessionBaseUrl!, Map<String, String>.from(_cookies));
+    }
+  }
   String? get schoolLogoUrl {
     if (_cachedSchoolLogoUrl != null && _cachedSchoolLogoUrl!.trim().isNotEmpty) {
       return _cachedSchoolLogoUrl;
@@ -187,13 +220,12 @@ class ApiService {
 
   void setBaseUrl(String newUrl) {
     final normalized = _normalizeBaseUrl(newUrl);
-    if (_baseUrl != normalized) {
-      _baseUrl = normalized;
-      if (_sessionBaseUrl != _baseUrl) {
-        _cookies.clear();
-        _xsrfToken = null;
-        _cachedSchoolLogoUrl = null;
-      }
+    _baseUrl = normalized;
+    if (_sessionBaseUrl != null && _sessionBaseUrl != _baseUrl) {
+      _cookies.clear();
+      _xsrfToken = null;
+      _cachedSchoolLogoUrl = null;
+      _sessionBaseUrl = _baseUrl;
     }
   }
 
@@ -223,26 +255,50 @@ class ApiService {
     final rawSetCookie = response.headers['set-cookie'];
     if (rawSetCookie == null || rawSetCookie.isEmpty) return;
 
-    _sessionBaseUrl = activeOriginUrl;
-
     // Dart's http package concatenates multiple Set-Cookie headers with ','.
     // Split only on commas that precede a new cookie key=value pair (avoiding commas in expires=Mon, 16-Oct...).
     final cookieParts = rawSetCookie.split(RegExp(r',(?=\s*[A-Za-z0-9_\-]+=)'));
+    _applySetCookieParts(cookieParts, activeOriginUrl);
+  }
+
+  void _applySetCookieParts(Iterable<String> cookieParts, String activeOriginUrl) {
+    _sessionBaseUrl = _normalizeBaseUrl(activeOriginUrl);
+    bool changed = false;
+
     for (final part in cookieParts) {
+      final lowerPart = part.toLowerCase();
+      final isExpiredOrDeleted =
+          lowerPart.contains('max-age=0') || lowerPart.contains('max-age=-');
       final firstSegment = part.split(';').first.trim();
       final eqIndex = firstSegment.indexOf('=');
       if (eqIndex > 0) {
         final name = firstSegment.substring(0, eqIndex).trim();
         final value = firstSegment.substring(eqIndex + 1).trim();
-        _cookies[name] = value;
-        if (name.toUpperCase() == 'XSRF-TOKEN') {
-          try {
-            _xsrfToken = Uri.decodeComponent(value);
-          } catch (_) {
-            _xsrfToken = value;
+        if (isExpiredOrDeleted || value.isEmpty || value == 'deleted') {
+          if (_cookies.remove(name) != null) {
+            changed = true;
+          }
+          if (name.toUpperCase() == 'XSRF-TOKEN') {
+            _xsrfToken = null;
+          }
+        } else {
+          if (_cookies[name] != value) {
+            _cookies[name] = value;
+            changed = true;
+          }
+          if (name.toUpperCase() == 'XSRF-TOKEN') {
+            try {
+              _xsrfToken = Uri.decodeComponent(value);
+            } catch (_) {
+              _xsrfToken = value;
+            }
           }
         }
       }
+    }
+
+    if (changed) {
+      onCookiesChanged?.call(_sessionBaseUrl!, Map<String, String>.from(_cookies));
     }
   }
 
@@ -489,19 +545,27 @@ class ApiService {
       try {
         final sw = Stopwatch()..start();
         final uri = Uri.parse('$_baseUrl${ApiConstants.schoolImageEndpoint}');
-        final res = await http.get(uri).timeout(const Duration(seconds: 30));
+        final timeout = (!EnvConfig.isRelease && _isLocalhostUrl(_baseUrl))
+            ? const Duration(seconds: 3)
+            : const Duration(seconds: 30);
+        final res = await http.get(uri).timeout(timeout);
         sw.stop();
         _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
         return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
       } catch (_) {
-        if (!EnvConfig.isRelease && _baseUrl != ApiConstants.localBaseUrl) {
+        final fallbackBase = _debugFallbackBaseUrl();
+        if (fallbackBase != null) {
           try {
             final sw = Stopwatch()..start();
             final fallbackUri =
-                Uri.parse('${ApiConstants.localBaseUrl}${ApiConstants.schoolImageEndpoint}');
-            final res = await http.get(fallbackUri).timeout(const Duration(seconds: 3));
+                Uri.parse('$fallbackBase${ApiConstants.schoolImageEndpoint}');
+            final fallbackTimeout = _isLocalhostUrl(fallbackBase)
+                ? const Duration(seconds: 3)
+                : const Duration(seconds: 20);
+            final res = await http.get(fallbackUri).timeout(fallbackTimeout);
             sw.stop();
-            _updateCookiesFromResponse(res, ApiConstants.localBaseUrl, rttMs: sw.elapsedMilliseconds);
+            _promoteDebugFallbackIfAppropriate(fallbackBase);
+            _updateCookiesFromResponse(res, fallbackBase, rttMs: sw.elapsedMilliseconds);
             return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
           } catch (_) {}
         }
@@ -510,25 +574,60 @@ class ApiService {
     });
   }
 
-  /// Helper to send a POST request with automatic CSRF session handling and local fallback in debug mode
+  static bool _isLocalhostUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('://localhost') || lower.contains('://127.0.0.1');
+  }
+
+  String? _debugFallbackBaseUrl() {
+    if (EnvConfig.isRelease) return null;
+    if (EnvConfig.isHrisMode) {
+      final candidate = _isLocalhostUrl(_baseUrl)
+          ? _normalizeBaseUrl(EnvConfig.releaseHrisBaseUrl)
+          : _normalizeBaseUrl(EnvConfig.debugHrisBaseUrl);
+      return candidate != _baseUrl ? candidate : null;
+    }
+    final local = _normalizeBaseUrl(ApiConstants.localBaseUrl);
+    return local != _baseUrl ? local : null;
+  }
+
+  void _promoteDebugFallbackIfAppropriate(String fallbackBase) {
+    // In HRIS debug mode, if localhost XAMPP is stopped and releaseHrisBaseUrl is live,
+    // promote _baseUrl so subsequent calls don't wait on localhost first.
+    if (!EnvConfig.isRelease &&
+        EnvConfig.isHrisMode &&
+        _isLocalhostUrl(_baseUrl) &&
+        !_isLocalhostUrl(fallbackBase)) {
+      _baseUrl = _normalizeBaseUrl(fallbackBase);
+    }
+  }
+
+  /// Helper to send a POST request with automatic CSRF session handling and debug fallback
   Future<http.Response?> _postWithFallback(
     String endpoint, {
     Object? body,
     Duration timeout = const Duration(seconds: 15),
     bool requiresCsrf = false,
     String? contentType,
+    Map<String, String>? extraHeaders,
   }) async {
     if (requiresCsrf && (_cookies.isEmpty || _xsrfToken == null || _sessionBaseUrl != _baseUrl)) {
       await ensureSessionAndFetchLogo(forceRefresh: true);
     }
 
     final headers = _buildHeaders(contentType: contentType);
+    if (extraHeaders != null) {
+      headers.addAll(extraHeaders);
+    }
 
     // 1. Try configured baseUrl first
     try {
       final sw = Stopwatch()..start();
       final uri = Uri.parse('$_baseUrl$endpoint');
-      var res = await http.post(uri, headers: headers, body: body).timeout(timeout);
+      final firstTimeout = (!EnvConfig.isRelease && _isLocalhostUrl(_baseUrl))
+          ? const Duration(seconds: 3)
+          : timeout;
+      var res = await http.post(uri, headers: headers, body: body).timeout(firstTimeout);
       sw.stop();
       _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
 
@@ -536,6 +635,7 @@ class ApiService {
       if (res.statusCode == 419 && requiresCsrf) {
         await ensureSessionAndFetchLogo(forceRefresh: true);
         final retryHeaders = _buildHeaders(contentType: contentType);
+        if (extraHeaders != null) retryHeaders.addAll(extraHeaders);
         final retrySw = Stopwatch()..start();
         res = await http.post(uri, headers: retryHeaders, body: body).timeout(timeout);
         retrySw.stop();
@@ -544,16 +644,21 @@ class ApiService {
 
       return res;
     } catch (_) {
-      // 2. In debug mode only, fall back to local if configured URL fails
-      if (!EnvConfig.isRelease && _baseUrl != ApiConstants.localBaseUrl) {
+      // 2. In debug mode only, fall back if configured URL fails
+      final fallbackBase = _debugFallbackBaseUrl();
+      if (fallbackBase != null) {
         try {
           final sw = Stopwatch()..start();
-          final fallbackUri = Uri.parse('${ApiConstants.localBaseUrl}$endpoint');
+          final fallbackUri = Uri.parse('$fallbackBase$endpoint');
+          final fallbackTimeout = _isLocalhostUrl(fallbackBase)
+              ? const Duration(seconds: 3)
+              : timeout;
           final res = await http
               .post(fallbackUri, headers: headers, body: body)
-              .timeout(const Duration(seconds: 3));
+              .timeout(fallbackTimeout);
           sw.stop();
-          _updateCookiesFromResponse(res, ApiConstants.localBaseUrl, rttMs: sw.elapsedMilliseconds);
+          _promoteDebugFallbackIfAppropriate(fallbackBase);
+          _updateCookiesFromResponse(res, fallbackBase, rttMs: sw.elapsedMilliseconds);
           return res;
         } catch (_) {}
       }
@@ -613,6 +718,16 @@ class ApiService {
   }
 
   Future<ScanResponseModel> _executeSendRfidScan(ScanRecordModel scan) async {
+    if (EnvConfig.isHrisMode) {
+      final hrisRes = await sendHrisAttendanceTap(scan);
+      final datePart = scan.enterAt.trim().split(' ').first;
+      return ScanResponseModel.fromHrisTapResponse(
+        hrisRes,
+        hrisBaseUrl: _baseUrl,
+        date: datePart,
+      );
+    }
+
     final endpoint = ApiConstants.saveRfidEntryEndpoint;
     final isStudentEntryEndpoint = endpoint.toLowerCase().contains('student_entry');
     final rawPayload = scan.toErpPayload();
@@ -668,6 +783,382 @@ class ApiService {
     // ignore: avoid_print
     print('[ApiService RFID Tap] sendRfidScan failed ($code): $snippet');
     return ScanResponseModel.networkError('Server returned error $code', httpStatusCode: code);
+  }
+
+  // =========================================================================
+  // HRIS Online Attendance & Passcode Endpoints
+  // =========================================================================
+
+  /// Probes `GET /hris/online_attendance` with `followRedirects = false` to detect:
+  /// - `302 Found -> /hris/attendance/passcode`: school requires a passcode before unlocking
+  /// - `200 OK` (`<online-attendance ... />`): no passcode required OR already unlocked via cookie
+  /// - Network error: offline fallback
+  Future<HrisPortalAccessResult> checkHrisPortalAccess() async {
+    final primaryAttempt = await _probeHrisOnlineAttendance(_baseUrl);
+    if (primaryAttempt != null) {
+      return primaryAttempt;
+    }
+
+    final fallbackBase = _debugFallbackBaseUrl();
+    if (fallbackBase != null) {
+      final fallbackAttempt = await _probeHrisOnlineAttendance(fallbackBase);
+      if (fallbackAttempt != null) {
+        _promoteDebugFallbackIfAppropriate(fallbackBase);
+        return fallbackAttempt;
+      }
+    }
+
+    return const HrisPortalAccessResult(
+      status: HrisAccessStatus.offlineError,
+      errorMessage: 'Unable to connect to the HRIS server.',
+    );
+  }
+
+  Future<HrisPortalAccessResult?> _probeHrisOnlineAttendance(String candidateBaseUrl) async {
+    final client = HttpClient();
+    try {
+      final isLocal = _isLocalhostUrl(candidateBaseUrl);
+      client.connectionTimeout = isLocal ? const Duration(seconds: 3) : const Duration(seconds: 20);
+
+      final sw = Stopwatch()..start();
+      final uri = Uri.parse('$candidateBaseUrl${ApiConstants.hrisOnlineAttendanceEndpoint}');
+      final req = await client.getUrl(uri);
+      req.followRedirects = false;
+      req.headers.set(
+        HttpHeaders.acceptHeader,
+        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      );
+      req.headers.set(
+        HttpHeaders.userAgentHeader,
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OrangeAppsHRIS/1.0',
+      );
+      if (_cookies.isNotEmpty) {
+        req.headers.set(
+          HttpHeaders.cookieHeader,
+          _cookies.entries.map((e) => '${e.key}=${e.value}').join('; '),
+        );
+      }
+
+      final res = await req.close().timeout(
+            isLocal ? const Duration(seconds: 4) : const Duration(seconds: 25),
+          );
+      sw.stop();
+
+      // Capture authoritative server Date header
+      if (sw.elapsedMilliseconds < 2500) {
+        final rawDate = res.headers.value(HttpHeaders.dateHeader);
+        if (rawDate != null && rawDate.isNotEmpty) {
+          try {
+            final manila = HttpDate.parse(rawDate).toUtc().add(const Duration(hours: 8));
+            final wallClock = DateTime(
+              manila.year,
+              manila.month,
+              manila.day,
+              manila.hour,
+              manila.minute,
+              manila.second,
+            );
+            onServerTimeReceived?.call(wallClock);
+          } catch (_) {}
+        }
+      }
+
+      // Capture Set-Cookie headers directly from HttpClientResponse (no comma-concatenation loss!)
+      final setCookies = res.headers[HttpHeaders.setCookieHeader];
+      if (setCookies != null && setCookies.isNotEmpty) {
+        _applySetCookieParts(setCookies, candidateBaseUrl);
+      }
+
+      final status = res.statusCode;
+      final location = res.headers.value(HttpHeaders.locationHeader) ?? '';
+      final body = await res.transform(utf8.decoder).join();
+
+      final isRedirectToPasscode = (status == 301 ||
+              status == 302 ||
+              status == 303 ||
+              status == 307 ||
+              status == 308) &&
+          location.toLowerCase().contains('attendance/passcode');
+      final isPasscodeHtml = status == 200 &&
+          body.toLowerCase().contains('<attendance-passcode');
+
+      if (isRedirectToPasscode || isPasscodeHtml) {
+        String? passcodeLogoUrl = _extractPasscodeSchoolLogo(body);
+        if (!isPasscodeHtml) {
+          // Load GET /attendance/passcode once to ensure fresh XSRF-TOKEN/session cookies & school-img
+          passcodeLogoUrl = await _fetchPasscodePageLogoAndSession(candidateBaseUrl);
+        }
+        passcodeLogoUrl ??= await ensureSessionAndFetchLogo();
+        return HrisPortalAccessResult(
+          status: HrisAccessStatus.requiresPasscode,
+          passcodeSchoolLogoUrl: passcodeLogoUrl,
+          activeHrisBaseUrl: candidateBaseUrl,
+        );
+      }
+
+      if (status == 200) {
+        final parsed = HrisPortalConfig.fromOnlineAttendanceHtml(body);
+        if (parsed.schoolImage.isNotEmpty) {
+          _cachedSchoolLogoUrl = parsed.schoolImage;
+        }
+        final prevBase = _baseUrl;
+        _baseUrl = _normalizeBaseUrl(candidateBaseUrl);
+        final idType = await fetchHrisIdSettings();
+        _baseUrl = prevBase;
+
+        final fullConfig = parsed.copyWith(idType: idType);
+        hrisIsRestricted = fullConfig.isRestricted;
+        // Use time_in_type = 2 by default so both qr.rfids AND plain employee_id resolve cleanly
+        // (ScanRecordModel.toHrisPayload automatically switches to 1 if scanned string contains ',')
+        hrisTimeInType = 2;
+
+        return HrisPortalAccessResult(
+          status: HrisAccessStatus.unlocked,
+          config: fullConfig,
+          activeHrisBaseUrl: candidateBaseUrl,
+        );
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('[ApiService HRIS] _probeHrisOnlineAttendance($candidateBaseUrl) error: $e');
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String? _extractPasscodeSchoolLogo(String html) {
+    if (html.isEmpty) return null;
+    final match = RegExp(
+      r'school[-_]img\s*=\s*(?:"([^"]+)"|' "'" r"([^']+)" "'" r')',
+      caseSensitive: false,
+    ).firstMatch(html);
+    final raw = (match?.group(1) ?? match?.group(2) ?? '').trim();
+    if (raw.isEmpty) return null;
+    final decoded = HrisPortalConfig.decodeHtmlEntities(raw);
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+      _cachedSchoolLogoUrl = decoded;
+      return decoded;
+    }
+    return null;
+  }
+
+  Future<String?> _fetchPasscodePageLogoAndSession(String candidateBaseUrl) async {
+    try {
+      final sw = Stopwatch()..start();
+      final uri = Uri.parse('$candidateBaseUrl${ApiConstants.hrisAttendancePasscodeEndpoint}');
+      final headers = <String, String>{
+        'Accept': 'text/html,application/xhtml+xml,*/*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OrangeAppsHRIS/1.0',
+        if (_cookies.isNotEmpty)
+          'Cookie': _cookies.entries.map((e) => '${e.key}=${e.value}').join('; '),
+      };
+      final res = await http.get(uri, headers: headers).timeout(const Duration(seconds: 15));
+      sw.stop();
+      _updateCookiesFromResponse(res, candidateBaseUrl, rttMs: sw.elapsedMilliseconds);
+      if (res.statusCode == 200) {
+        return _extractPasscodeSchoolLogo(res.body);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Submits `POST /hris/attendance/passcode` with `{"passcode": "..."}` and captures `Set-Cookie: attendance_unlocked`
+  Future<HrisPasscodeVerifyResult> verifyHrisPasscode(String passcode) async {
+    final cleanPasscode = passcode.trim();
+    if (cleanPasscode.isEmpty) {
+      return const HrisPasscodeVerifyResult(
+        isSuccess: false,
+        message: 'Please enter a passcode.',
+      );
+    }
+
+    if (_cookies.isEmpty || _xsrfToken == null) {
+      await _fetchPasscodePageLogoAndSession(_baseUrl);
+    }
+
+    final payload = jsonEncode({'passcode': cleanPasscode});
+    final passUrl = '$_baseUrl${ApiConstants.hrisAttendancePasscodeEndpoint}';
+
+    http.Response? res = await _postWithFallback(
+      ApiConstants.hrisAttendancePasscodeEndpoint,
+      body: payload,
+      timeout: const Duration(seconds: 20),
+      requiresCsrf: false,
+      extraHeaders: {
+        'Referer': passUrl,
+      },
+    );
+
+    // Retry once if session/CSRF expired (HTTP 419)
+    if (res != null && res.statusCode == 419) {
+      await _fetchPasscodePageLogoAndSession(_baseUrl);
+      res = await _postWithFallback(
+        ApiConstants.hrisAttendancePasscodeEndpoint,
+        body: payload,
+        timeout: const Duration(seconds: 20),
+        requiresCsrf: false,
+        extraHeaders: {
+          'Referer': passUrl,
+        },
+      );
+    }
+
+    if (res == null) {
+      return const HrisPasscodeVerifyResult(
+        isSuccess: false,
+        message: 'Unable to reach server. Please check your internet connection.',
+        isNetworkError: true,
+      );
+    }
+
+    if (res.statusCode == 200) {
+      try {
+        final dynamic decoded = jsonDecode(res.body);
+        if (decoded is Map) {
+          final statusVal = decoded['status'];
+          final isOk = statusVal == 1 || statusVal == '1' || statusVal == true;
+          final text = (decoded['text'] ?? decoded['message'] ?? '').toString().trim();
+          return HrisPasscodeVerifyResult(
+            isSuccess: isOk,
+            message: text.isNotEmpty
+                ? text
+                : (isOk ? 'Passcode is correct.' : 'Passcode is incorrect.'),
+          );
+        }
+      } catch (_) {}
+    }
+
+    return HrisPasscodeVerifyResult(
+      isSuccess: false,
+      message: 'Unexpected response from server (${res.statusCode}).',
+      isNetworkError: res.statusCode >= 500,
+    );
+  }
+
+  /// Calls `POST /hris/check_settings` (`0` = QR only, `1` = RFID only, `2` = Both QR & RFID)
+  Future<int> fetchHrisIdSettings() async {
+    final res = await _postWithFallback(
+      ApiConstants.hrisCheckSettingsEndpoint,
+      body: jsonEncode({}),
+      timeout: const Duration(seconds: 12),
+      requiresCsrf: false,
+    );
+    if (res != null && res.statusCode == 200) {
+      final parsed = int.tryParse(res.body.trim().replaceAll('"', ''));
+      if (parsed != null) return parsed;
+    }
+    return 1;
+  }
+
+  /// Calls `POST /hris/time_in_today` to fetch today's employee attendance table (`Name | Time In | Time Out`)
+  Future<List<HrisTodayLogEntry>> fetchHrisTimeInToday({
+    required String dateNow,
+    required String timeNow,
+    String employeeId = '',
+  }) async {
+    final res = await _postWithFallback(
+      ApiConstants.hrisTimeInTodayEndpoint,
+      body: jsonEncode({
+        'date_now': dateNow,
+        'time_now': timeNow,
+        'employee_id': employeeId,
+      }),
+      timeout: const Duration(seconds: 15),
+      requiresCsrf: false,
+    );
+
+    if (res != null && res.statusCode == 200) {
+      try {
+        final dynamic decoded = jsonDecode(res.body);
+        if (decoded is List) {
+          return decoded
+              .whereType<Map>()
+              .map((m) => HrisTodayLogEntry.fromJson(Map<String, dynamic>.from(m)))
+              .toList();
+        }
+      } catch (e) {
+        debugPrint('[ApiService HRIS] fetchHrisTimeInToday parse error: $e');
+      }
+    }
+    return [];
+  }
+
+  /// Sends an employee attendance tap to HRIS (`POST /submit_attendance_by_id` or `/submit_attendance_by_json`),
+  /// always including `'from_desktop_app': 1` and preserving the tap's original `date_now` & `time_now`.
+  Future<HrisTapResponse> sendHrisAttendanceTap(
+    ScanRecordModel scan, {
+    int? timeInTypeOverride,
+  }) async {
+    final effectiveTimeInType = timeInTypeOverride ?? hrisTimeInType;
+    final rawEmployeeStr = scan.rfidCode.trim();
+
+    // Check if scanned string is a structured JSON QR payload {"branch_code":...,"employee_id":...,"uid":...}
+    Map<String, dynamic>? jsonQrEmployee;
+    if (rawEmployeeStr.startsWith('{') && rawEmployeeStr.endsWith('}')) {
+      try {
+        final dynamic decodedQr = jsonDecode(rawEmployeeStr);
+        if (decodedQr is Map &&
+            decodedQr.containsKey('branch_code') &&
+            decodedQr.containsKey('employee_id') &&
+            decodedQr.containsKey('uid')) {
+          jsonQrEmployee = Map<String, dynamic>.from(decodedQr);
+        }
+      } catch (_) {}
+    }
+
+    final basePayload = scan.toHrisPayload(
+      timeInType: effectiveTimeInType,
+      isRestricted: hrisIsRestricted,
+    );
+    basePayload['from_desktop_app'] = 1;
+
+    final String endpoint;
+    if (jsonQrEmployee != null) {
+      endpoint = ApiConstants.hrisSubmitAttendanceByJsonEndpoint;
+      basePayload['employee'] = jsonQrEmployee;
+    } else {
+      endpoint = ApiConstants.saveRfidEntryEndpoint;
+    }
+
+    // ignore: avoid_print
+    print('[ApiService HRIS Tap] POST $_baseUrl$endpoint -> $basePayload');
+
+    final response = await _postWithFallback(
+      endpoint,
+      body: jsonEncode(basePayload),
+      contentType: 'application/json',
+      timeout: const Duration(seconds: 25),
+      requiresCsrf: false,
+    );
+
+    if (response != null) {
+      // ignore: avoid_print
+      print('[ApiService HRIS Tap] Response [${response.statusCode}]: ${response.body}');
+      if (response.statusCode == 200) {
+        try {
+          final dynamic decoded = jsonDecode(response.body);
+          if (decoded is Map) {
+            return HrisTapResponse.fromJson(
+              Map<String, dynamic>.from(decoded),
+              httpStatusCode: 200,
+            );
+          }
+        } catch (e) {
+          return HrisTapResponse.networkError(
+            'Invalid response from HRIS server ($e)',
+            httpStatusCode: 200,
+          );
+        }
+      }
+    }
+
+    final code = response?.statusCode ?? 0;
+    return HrisTapResponse.networkError(
+      code == 0 ? 'Connection error' : 'Server returned error $code',
+      httpStatusCode: code,
+    );
   }
 
   /// Fetches the full K-12, College, and Employee roster from `/kiosk_sync_roster` (session-free)
