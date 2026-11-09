@@ -12,6 +12,138 @@ import '../models/scan_record_model.dart';
 import '../models/scan_response_model.dart';
 import 'local_db_service.dart';
 
+/// Process-wide Singleton State Manager that coordinates all RFID tap HTTP POSTs,
+/// offline-to-online queue syncing, and connectivity checks.
+/// Guarantees that a single tap or pending record can NEVER spawn multiple HTTP requests.
+class TapSyncCoordinator {
+  TapSyncCoordinator._();
+  static final TapSyncCoordinator instance = TapSyncCoordinator._();
+
+  final Map<String, Future<ScanResponseModel>> _inFlightByUuid = {};
+  final Map<String, Future<ScanResponseModel>> _inFlightByRfid = {};
+  final Map<String, ScanResponseModel> _completedByUuid = {};
+
+  Future<void>? _activeQueueSyncFuture;
+  Future<bool>? _activeConnectivityFuture;
+
+  /// Returns true if this tap UUID is currently in-flight or has already completed
+  bool isUuidInFlight(String uuid) => _inFlightByUuid.containsKey(uuid.trim());
+  bool isUuidCompleted(String uuid) => _completedByUuid.containsKey(uuid.trim());
+  bool isRfidInFlight(String rfid) => _inFlightByRfid.containsKey(rfid.trim());
+  bool get isSyncingQueue => _activeQueueSyncFuture != null;
+
+  /// Registers a tap UUID as in-flight before any async gap (used by KioskNotifier)
+  final Set<String> _claimedUuids = <String>{};
+  bool claimUuid(String uuid) {
+    final clean = uuid.trim();
+    if (clean.isEmpty) return false;
+    if (_completedByUuid.containsKey(clean) || _inFlightByUuid.containsKey(clean)) {
+      return false;
+    }
+    return _claimedUuids.add(clean);
+  }
+
+  void releaseClaimedUuid(String uuid) {
+    _claimedUuids.remove(uuid.trim());
+  }
+
+  bool isUuidClaimedOrInFlight(String uuid) {
+    final clean = uuid.trim();
+    return _claimedUuids.contains(clean) || _inFlightByUuid.containsKey(clean);
+  }
+
+  /// Coalesces concurrent connectivity checks into a single in-flight Future
+  Future<bool> runConnectivityCheck(Future<bool> Function() task) {
+    if (_activeConnectivityFuture != null) {
+      return _activeConnectivityFuture!;
+    }
+    late final Future<bool> trackedFuture;
+    trackedFuture = task().whenComplete(() {
+      if (_activeConnectivityFuture == trackedFuture) {
+        _activeConnectivityFuture = null;
+      }
+    });
+    _activeConnectivityFuture = trackedFuture;
+    return trackedFuture;
+  }
+
+  /// Ensures only one offline-queue sync loop can ever run at a time across the entire app.
+  /// If a sync loop is already running, callers await the active sync instead of starting a second loop.
+  Future<void> runExclusiveOfflineSync(Future<void> Function() task) {
+    if (_activeQueueSyncFuture != null) {
+      // ignore: avoid_print
+      print('[TapSyncCoordinator] Offline queue sync already in progress; coalescing caller.');
+      return _activeQueueSyncFuture!;
+    }
+    late final Future<void> trackedFuture;
+    trackedFuture = task().whenComplete(() {
+      if (_activeQueueSyncFuture == trackedFuture) {
+        _activeQueueSyncFuture = null;
+      }
+    });
+    _activeQueueSyncFuture = trackedFuture;
+    return trackedFuture;
+  }
+
+  /// Executes a tap POST with strict singleton single-flight deduplication and idempotency.
+  Future<ScanResponseModel> executeTapPost({
+    required ScanRecordModel scan,
+    required Future<ScanResponseModel> Function(ScanRecordModel scan) sender,
+  }) async {
+    final uuid = scan.uuid.trim();
+    final cleanRfid = scan.rfidCode.trim();
+    final isLiveScan = scan.errorMessage != 'OFFLINE_SAVED';
+
+    // 1. Idempotency check: if this exact tap UUID already succeeded or was permanently rejected, never POST again
+    if (uuid.isNotEmpty && _completedByUuid.containsKey(uuid)) {
+      // ignore: avoid_print
+      print('[TapSyncCoordinator] Skipping duplicate POST for already-completed UUID=$uuid');
+      return _completedByUuid[uuid]!;
+    }
+
+    // 2. Single-flight check by UUID: if this exact tap UUID is currently in-flight, coalesce with it
+    if (uuid.isNotEmpty && _inFlightByUuid.containsKey(uuid)) {
+      // ignore: avoid_print
+      print('[TapSyncCoordinator] Coalescing duplicate concurrent call for in-flight UUID=$uuid');
+      return _inFlightByUuid[uuid]!;
+    }
+
+    // 3. Single-flight check by live RFID: if a live scan for this same RFID is already in-flight, coalesce
+    if (isLiveScan && cleanRfid.isNotEmpty && _inFlightByRfid.containsKey(cleanRfid)) {
+      // ignore: avoid_print
+      print('[TapSyncCoordinator] Coalescing concurrent live POST for in-flight RFID=$cleanRfid');
+      return _inFlightByRfid[cleanRfid]!;
+    }
+
+    final future = sender(scan);
+    if (uuid.isNotEmpty) {
+      _inFlightByUuid[uuid] = future;
+    }
+    if (isLiveScan && cleanRfid.isNotEmpty) {
+      _inFlightByRfid[cleanRfid] = future;
+    }
+
+    try {
+      final result = await future;
+      if ((result.isSuccess || result.isPermanentRejection) && uuid.isNotEmpty) {
+        if (_completedByUuid.length >= 2000) {
+          _completedByUuid.remove(_completedByUuid.keys.first);
+        }
+        _completedByUuid[uuid] = result;
+      }
+      return result;
+    } finally {
+      if (uuid.isNotEmpty) {
+        _inFlightByUuid.remove(uuid);
+        _claimedUuids.remove(uuid);
+      }
+      if (cleanRfid.isNotEmpty && _inFlightByRfid[cleanRfid] == future) {
+        _inFlightByRfid.remove(cleanRfid);
+      }
+    }
+  }
+}
+
 /// Service responsible for all HTTP communication with the existing ERP APIs.
 /// Reuses the existing backend web endpoints:
 /// 1. GET /schImg (AdminController@getSchImg) -> fetches school logo URL & initializes session + XSRF-TOKEN cookies
@@ -29,11 +161,6 @@ class ApiService {
   static final Map<String, String> _cookies = {};
   static String? _xsrfToken;
   static String? _cachedSchoolLogoUrl;
-
-  // Transport-level single-flight & idempotency guards to guarantee no tap is ever POSTed twice
-  static final Map<String, Future<ScanResponseModel>> _inFlightScansByUuid = {};
-  static final Map<String, Future<ScanResponseModel>> _inFlightScansByRfid = {};
-  static final Map<String, ScanResponseModel> _completedScansByUuid = {};
 
   ApiService({
     String? baseUrl,
@@ -355,29 +482,32 @@ class ApiService {
     return result;
   }
 
-  /// Checks if the ERP server is reachable
-  Future<bool> checkConnectivity() async {
-    try {
-      final sw = Stopwatch()..start();
-      final uri = Uri.parse('$_baseUrl${ApiConstants.schoolImageEndpoint}');
-      final res = await http.get(uri).timeout(const Duration(seconds: 15));
-      sw.stop();
-      _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
-      return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
-    } catch (_) {
-      if (!EnvConfig.isRelease && _baseUrl != ApiConstants.localBaseUrl) {
-        try {
-          final sw = Stopwatch()..start();
-          final fallbackUri =
-              Uri.parse('${ApiConstants.localBaseUrl}${ApiConstants.schoolImageEndpoint}');
-          final res = await http.get(fallbackUri).timeout(const Duration(seconds: 3));
-          sw.stop();
-          _updateCookiesFromResponse(res, ApiConstants.localBaseUrl, rttMs: sw.elapsedMilliseconds);
-          return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
-        } catch (_) {}
+  /// Checks if the ERP server is reachable (30-second timeout for slow school connections,
+  /// coalesced via TapSyncCoordinator singleton so concurrent checks never stack).
+  Future<bool> checkConnectivity() {
+    return TapSyncCoordinator.instance.runConnectivityCheck(() async {
+      try {
+        final sw = Stopwatch()..start();
+        final uri = Uri.parse('$_baseUrl${ApiConstants.schoolImageEndpoint}');
+        final res = await http.get(uri).timeout(const Duration(seconds: 30));
+        sw.stop();
+        _updateCookiesFromResponse(res, _baseUrl, rttMs: sw.elapsedMilliseconds);
+        return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
+      } catch (_) {
+        if (!EnvConfig.isRelease && _baseUrl != ApiConstants.localBaseUrl) {
+          try {
+            final sw = Stopwatch()..start();
+            final fallbackUri =
+                Uri.parse('${ApiConstants.localBaseUrl}${ApiConstants.schoolImageEndpoint}');
+            final res = await http.get(fallbackUri).timeout(const Duration(seconds: 3));
+            sw.stop();
+            _updateCookiesFromResponse(res, ApiConstants.localBaseUrl, rttMs: sw.elapsedMilliseconds);
+            return res.statusCode == 200 || res.statusCode == 404 || res.statusCode == 422;
+          } catch (_) {}
+        }
+        return false;
       }
-      return false;
-    }
+    });
   }
 
   /// Helper to send a POST request with automatic CSRF session handling and local fallback in debug mode
@@ -473,65 +603,20 @@ class ApiService {
   }
 
   /// Sends an RFID card tap to the ERP for attendance logging & parent SMS.
-  /// Enforces transport-level single-flight deduplication and idempotency so the same
-  /// tap UUID or concurrent live RFID scan can never trigger duplicate HTTP POST requests.
-  Future<ScanResponseModel> sendRfidScan(ScanRecordModel scan) async {
-    final uuid = scan.uuid.trim();
-    final cleanRfid = scan.rfidCode.trim();
-
-    // 1. Idempotency check: if this exact tap UUID already succeeded, never POST it again
-    if (uuid.isNotEmpty && _completedScansByUuid.containsKey(uuid)) {
-      // ignore: avoid_print
-      print('[ApiService RFID Tap] Skipping duplicate POST for already-completed UUID=$uuid');
-      return _completedScansByUuid[uuid]!;
-    }
-
-    // 2. Single-flight check by UUID: if this exact tap UUID is currently in-flight, coalesce with it
-    if (uuid.isNotEmpty && _inFlightScansByUuid.containsKey(uuid)) {
-      // ignore: avoid_print
-      print('[ApiService RFID Tap] Coalescing duplicate concurrent call for in-flight UUID=$uuid');
-      return _inFlightScansByUuid[uuid]!;
-    }
-
-    // 3. Single-flight check by live RFID: if a live scan for this same RFID is already in-flight, coalesce
-    final isLiveScan = scan.errorMessage != 'OFFLINE_SAVED';
-    if (isLiveScan && cleanRfid.isNotEmpty && _inFlightScansByRfid.containsKey(cleanRfid)) {
-      // ignore: avoid_print
-      print('[ApiService RFID Tap] Coalescing concurrent live POST for in-flight RFID=$cleanRfid');
-      return _inFlightScansByRfid[cleanRfid]!;
-    }
-
-    final future = _executeSendRfidScan(scan);
-    if (uuid.isNotEmpty) {
-      _inFlightScansByUuid[uuid] = future;
-    }
-    if (isLiveScan && cleanRfid.isNotEmpty) {
-      _inFlightScansByRfid[cleanRfid] = future;
-    }
-
-    try {
-      final result = await future;
-      if (result.isSuccess && uuid.isNotEmpty) {
-        if (_completedScansByUuid.length >= 1000) {
-          _completedScansByUuid.remove(_completedScansByUuid.keys.first);
-        }
-        _completedScansByUuid[uuid] = result;
-      }
-      return result;
-    } finally {
-      if (uuid.isNotEmpty) {
-        _inFlightScansByUuid.remove(uuid);
-      }
-      if (cleanRfid.isNotEmpty && _inFlightScansByRfid[cleanRfid] == future) {
-        _inFlightScansByRfid.remove(cleanRfid);
-      }
-    }
+  /// Enforces process-wide singleton single-flight deduplication and idempotency via [TapSyncCoordinator]
+  /// so the same tap UUID or concurrent live RFID scan can never trigger duplicate HTTP POST requests.
+  Future<ScanResponseModel> sendRfidScan(ScanRecordModel scan) {
+    return TapSyncCoordinator.instance.executeTapPost(
+      scan: scan,
+      sender: _executeSendRfidScan,
+    );
   }
 
   Future<ScanResponseModel> _executeSendRfidScan(ScanRecordModel scan) async {
     final endpoint = ApiConstants.saveRfidEntryEndpoint;
     final isStudentEntryEndpoint = endpoint.toLowerCase().contains('student_entry');
     final rawPayload = scan.toErpPayload();
+    rawPayload['from_desktop_app'] = 1;
     final payloadMap = rawPayload.map((k, v) => MapEntry(k, v.toString()));
     final requestContentType = isStudentEntryEndpoint
         ? 'application/json'
@@ -553,7 +638,7 @@ class ApiService {
       endpoint,
       body: requestBody,
       contentType: requestContentType,
-      timeout: const Duration(seconds: 20),
+      timeout: const Duration(seconds: 30),
       requiresCsrf: isStudentEntryEndpoint,
     );
 

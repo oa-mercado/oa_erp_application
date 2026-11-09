@@ -17,6 +17,7 @@ class _ActivityLogsDialogState extends ConsumerState<ActivityLogsDialog> {
   final FocusNode _searchFocusNode = FocusNode();
 
   bool _todayOnly = false;
+  bool _isSyncingNow = false;
   List<ScanRecordModel> _logs = [];
   ({int totalToday, int entranceToday, int exitToday, int unsyncedTotal, int totalStored}) _stats = (
     totalToday: 0,
@@ -75,6 +76,13 @@ class _ActivityLogsDialogState extends ConsumerState<ActivityLogsDialog> {
 
   @override
   Widget build(BuildContext context) {
+    // Auto-refresh logs in real time whenever pending offline queue count changes.
+    ref.listen<int>(offlineQueueCountProvider, (previous, next) {
+      if (previous != next) {
+        _loadLogs();
+      }
+    });
+
     final syncedCount = (_stats.totalStored - _stats.unsyncedTotal).clamp(0, _stats.totalStored);
 
     return Dialog(
@@ -146,26 +154,42 @@ class _ActivityLogsDialogState extends ConsumerState<ActivityLogsDialog> {
                     const SizedBox(width: 6),
                     InkWell(
                       borderRadius: BorderRadius.circular(12),
-                      onTap: () async {
-                        final notifier = ref.read(kioskScanProvider.notifier);
-                        await notifier.checkConnectivity(forceSync: true);
-                        await notifier.syncOfflineQueue(force: true);
-                        _loadLogs();
-                      },
+                      onTap: _isSyncingNow
+                          ? null
+                          : () async {
+                              setState(() => _isSyncingNow = true);
+                              try {
+                                final notifier = ref.read(kioskScanProvider.notifier);
+                                final isOnline = await notifier.checkConnectivity(
+                                  forceSync: true,
+                                  onlySyncQueue: true,
+                                );
+                                if (isOnline) {
+                                  await notifier.syncOfflineQueue(force: true);
+                                }
+                              } finally {
+                                if (mounted) {
+                                  setState(() => _isSyncingNow = false);
+                                }
+                                _loadLogs();
+                              }
+                            },
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2563EB),
+                          color: _isSyncingNow
+                              ? const Color(0xFF93C5FD)
+                              : const Color(0xFF2563EB),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: const Row(
+                        child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.sync, size: 13, color: Colors.white),
-                            SizedBox(width: 4),
+                            const Icon(Icons.sync, size: 13, color: Colors.white),
+                            const SizedBox(width: 4),
                             Text(
-                              'Sync Now',
-                              style: TextStyle(
+                              _isSyncingNow ? 'Syncing...' : 'Sync Now',
+                              style: const TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
                                 color: Colors.white,
