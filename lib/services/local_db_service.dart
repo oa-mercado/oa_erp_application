@@ -135,6 +135,7 @@ class CachedStudentProfile {
 class LocalDbService {
   Database? _db;
   static String? _resolvedDataDirPath;
+  static final http.Client _imageHttpClient = http.Client();
 
   int _timeOffsetMs = 0;
   bool _isManualTimeOffset = false;
@@ -1274,9 +1275,9 @@ class LocalDbService {
         return file.path;
       }
 
-      // 2. Fetch over network
+      // 2. Fetch over network using persistent keep-alive client
       final uri = Uri.parse(fullImageUrl);
-      final response = await http.get(uri).timeout(const Duration(seconds: 8));
+      final response = await _imageHttpClient.get(uri).timeout(const Duration(seconds: 8));
       if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
         await file.writeAsBytes(response.bodyBytes);
         updateStudentLocalImagePath(rfidCode, personId, file.path);

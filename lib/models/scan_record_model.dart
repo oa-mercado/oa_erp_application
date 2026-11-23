@@ -65,7 +65,7 @@ class ScanRecordModel {
     return '$y-$m-$d $h:$min:$s';
   }
 
-  /// Payload sent to POST /save_rfid_entry (includes stud_entry_tbl columns for sync)
+  /// Payload sent to POST /save_rfid_entry or /student_entry (includes stud_entry_tbl columns for sync)
   Map<String, dynamic> toErpPayload() => {
         'uuid': uuid,
         'rfid_code': rfidCode,
@@ -87,6 +87,7 @@ class ScanRecordModel {
         'adviser_id': adviserId,
         'school_start': schoolStart,
         'text_received': textReceived,
+        'from_desktop_app': 1,
       };
 
   /// Full stud_entry_tbl JSON representation stored in the Local DB

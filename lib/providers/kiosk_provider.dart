@@ -206,17 +206,16 @@ class KioskNotifier extends Notifier<KioskState> {
       // Clear out any old invalid / permanently rejected taps from local DB
       _localDb.clearFailedOrInvalidTaps();
       ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
-      // Verify connectivity immediately on launch
-      await _checkConnectivity();
+      // Verify connectivity immediately on launch (this also flushes pending offline taps first!)
+      final isOnline = await checkConnectivity();
+      if (!isOnline) return;
       // Sync authoritative server clock
       unawaited(_apiService.fetchServerTime());
       // Cache all gates from server into SQLite so gate selection works offline
       unawaited(syncGatesFromServer());
-      // Run initial maintenance & version check immediately
-      await _checkRemoteStatus();
       // Sync all K-12, College, and Employee profiles into SQLite Local DB on startup
       await syncRosterFromServer();
-      // Eagerly pre-download photos in background
+      // Eagerly pre-download photos in background after offline taps and roster are done
       unawaited(syncAllPendingAssets());
     });
 
@@ -264,7 +263,7 @@ class KioskNotifier extends Notifier<KioskState> {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkConnectivity());
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkConnectivity());
   }
 
   Future<void> _checkRemoteStatus() async {
@@ -280,7 +279,7 @@ class KioskNotifier extends Notifier<KioskState> {
     } catch (_) {}
   }
 
-  Future<bool> checkConnectivity({bool forceSync = false}) async {
+  Future<bool> checkConnectivity({bool forceSync = false, bool onlySyncQueue = false}) async {
     if (_isCheckingConnectivity && !forceSync) {
       return !ref.read(isOfflineProvider);
     }
@@ -306,19 +305,25 @@ class KioskNotifier extends Notifier<KioskState> {
         return !currentlyOffline;
       }
 
-      // Automatically flush offline queue whenever online and pending records exist
+      // PRIORITY #1: Flush pending offline attendance taps FIRST and wait for completion
+      // before starting any heavy gate, roster, or asset downloads!
       if (!currentlyOffline && _localDb.unsyncedCount > 0) {
-        unawaited(syncOfflineQueue(force: forceSync));
+        await syncOfflineQueue(force: forceSync || wasOffline || onlySyncQueue);
       }
 
-      // If we just reconnected OR if local caches (gates / roster) are still empty while online, sync them now
+      if (onlySyncQueue) {
+        return !currentlyOffline;
+      }
+
+      // PRIORITY #2: Only sync gates/roster/assets AFTER pending offline taps are flushed
       final needsGates = _localDb.getCachedGates().isEmpty;
       final needsRoster = _localDb.cachedRosterCount == 0;
       if (!currentlyOffline && (wasOffline || forceSync || needsGates || needsRoster)) {
         if (wasOffline || forceSync || needsGates) {
           unawaited(syncGatesFromServer());
         }
-        if (wasOffline || forceSync || needsRoster) {
+        // Only download the full 8,000+ roster if explicitly requested (forceSync) or if local DB is empty (needsRoster)
+        if (forceSync || needsRoster) {
           unawaited(syncRosterFromServer());
         }
         unawaited(syncAllPendingAssets());
@@ -466,12 +471,24 @@ class KioskNotifier extends Notifier<KioskState> {
       return '$cleanBase$cleanPath';
     }
 
-    const concurrency = 6;
+    const concurrency = 3;
     int currentIndex = 0;
 
     Future<void> worker() async {
       while (currentIndex < candidates.length) {
         if (!_isSyncingAssets) break;
+
+        // Pause image downloading immediately whenever an attendance tap or offline queue sync is running
+        // so attendance POST requests get 100% of network bandwidth and zero socket contention!
+        while (_isSyncingOfflineQueue ||
+            TapSyncCoordinator.instance.isSyncingQueue ||
+            _inFlightSyncUuids.isNotEmpty) {
+          if (!_isSyncingAssets) break;
+          await Future.delayed(const Duration(milliseconds: 250));
+        }
+        if (!_isSyncingAssets || ref.read(isOfflineProvider)) break;
+        if (currentIndex >= candidates.length) break;
+
         final index = currentIndex++;
         final profile = candidates[index];
         final fullUrl = resolveUrl(profile.imageUrl);
@@ -638,7 +655,8 @@ class KioskNotifier extends Notifier<KioskState> {
     }
 
     // 1b. In-flight RFID guard: if this card is currently undergoing a live online lookup, ignore duplicate scan
-    if (_inFlightRfidCodes.contains(cleanCode)) {
+    if (_inFlightRfidCodes.contains(cleanCode) ||
+        TapSyncCoordinator.instance.isRfidInFlight(cleanCode)) {
       return;
     }
 
@@ -775,9 +793,11 @@ class KioskNotifier extends Notifier<KioskState> {
         studentInfo: localDisplay.info,
       );
 
-      // Register UUID as in-flight BEFORE saving to SQLite so no background queue can ever pick it up prematurely
+      // Register UUID as in-flight in the process-wide singleton BEFORE saving to SQLite
+      // so no background queue or concurrent sync trigger can ever pick it up prematurely!
       if (!isOffline) {
         _inFlightSyncUuids.add(scan.uuid);
+        TapSyncCoordinator.instance.claimUuid(scan.uuid);
       }
 
       // ALWAYS immediately record the tap in SQLite stud_entry_tbl so it is NEVER lost!
@@ -876,6 +896,7 @@ class KioskNotifier extends Notifier<KioskState> {
 
     _inFlightRfidCodes.add(cleanCode);
     _inFlightSyncUuids.add(scan.uuid);
+    TapSyncCoordinator.instance.claimUuid(scan.uuid);
     try {
       final response = await _apiService.sendRfidScan(scan);
 
@@ -1005,6 +1026,7 @@ class KioskNotifier extends Notifier<KioskState> {
     } finally {
       _inFlightRfidCodes.remove(cleanCode);
       _inFlightSyncUuids.remove(scan.uuid);
+      TapSyncCoordinator.instance.releaseClaimedUuid(scan.uuid);
     }
   }
 
@@ -1019,7 +1041,12 @@ class KioskNotifier extends Notifier<KioskState> {
     required DateTime tapTime,
   }) async {
     _inFlightSyncUuids.add(scan.uuid);
+    TapSyncCoordinator.instance.claimUuid(scan.uuid);
     try {
+      if (TapSyncCoordinator.instance.isUuidInFlight(scan.uuid) ||
+          TapSyncCoordinator.instance.isUuidCompleted(scan.uuid)) {
+        return;
+      }
       if (_localDb.isRecordSynced(scan.uuid)) {
         return;
       }
@@ -1119,97 +1146,114 @@ class KioskNotifier extends Notifier<KioskState> {
       print('[Kiosk Sync Background] Exception syncing RFID=$cleanCode: $e');
     } finally {
       _inFlightSyncUuids.remove(scan.uuid);
+      TapSyncCoordinator.instance.releaseClaimedUuid(scan.uuid);
     }
   }
 
   DateTime? _lastFailedOfflineSyncTime;
 
   /// Uploads all unsynced `stud_entry_tbl` records to the server when connection is restored.
-  /// If an error occurred previously, enforces at least a 1-minute backoff interval unless [force] is true.
-  Future<void> syncOfflineQueue({bool force = false}) async {
-    if (_isSyncingOfflineQueue) return;
+  /// Coordinated through [TapSyncCoordinator] singleton so overlapping offline-to-online transitions,
+  /// heartbeat ticks, or manual Sync Now clicks can NEVER spawn parallel sync loops.
+  Future<void> syncOfflineQueue({bool force = false}) {
+    if (_isSyncingOfflineQueue || TapSyncCoordinator.instance.isSyncingQueue) {
+      return TapSyncCoordinator.instance.runExclusiveOfflineSync(() async {});
+    }
     if (!force && _lastFailedOfflineSyncTime != null) {
       final elapsed = DateTime.now().difference(_lastFailedOfflineSyncTime!);
       if (elapsed < const Duration(minutes: 1)) {
-        return; // Respect 1-minute cooldown before auto-retrying
+        return Future.value(); // Respect 1-minute cooldown before auto-retrying
       }
     }
-    _isSyncingOfflineQueue = true;
-    try {
-      final pending = _localDb.unsyncedRecords
-          .where((s) => !_inFlightSyncUuids.contains(s.uuid))
-          .toList();
-      if (pending.isEmpty) {
-        _lastFailedOfflineSyncTime = null;
-        return;
-      }
 
-      for (final scan in pending) {
-        if (_inFlightSyncUuids.contains(scan.uuid)) continue;
-        if (_localDb.isRecordSynced(scan.uuid)) continue;
-        _inFlightSyncUuids.add(scan.uuid);
-        try {
-          final res = await _apiService.sendRfidScan(scan);
-          if (res.isSuccess) {
-            if (res.isTapOnInterval) {
-              // Server did NOT record this queued tap because it was within the tap interval.
-              // Remove it from the local DB so it doesn't linger in pending or local history:
-              // ignore: avoid_print
-              print('[Kiosk Offline Sync] Server reported tap_on_interval=1 for queued RFID ${scan.rfidCode}. Removing from local DB queue/history...');
-              _localDb.deleteTapEntry(scan.uuid);
-            } else {
-              _localDb.markRecordSynced(scan.uuid, studentInfo: res.studentInfo);
-            }
-
-            // Also cache the student's profile & download photo if returned during offline sync!
-            if (res.studentInfo != null) {
-              final effectiveBaseUrl = scan.branchCode.isNotEmpty
-                  ? EnvConfig.getBranchBaseUrl(scan.branchCode)
-                  : ApiConstants.defaultBaseUrl;
-              unawaited(
-                _localDb.upsertStudentAndDownloadImage(
-                  rfidCode: scan.rfidCode,
-                  branchCode: scan.branchCode,
-                  onlineInfo: res.studentInfo!,
-                  baseUrl: effectiveBaseUrl,
-                  tapTime: scan.scannedAt,
-                ),
-              );
-            }
-          } else {
-            if (res.isPermanentRejection) {
-              // True business rejection from ERP (e.g. "Unable to Process Transaction Code Not Found")
-              // ignore: avoid_print
-              print('[Kiosk Offline Sync] Remote rejected queued RFID ${scan.rfidCode} (${res.message}). Clearing out from local DB...');
-              _localDb.deleteTapEntry(scan.uuid);
-              _localDb.deleteStudentFromCache(scan.rfidCode);
-            } else {
-              // Transient network or server error (HTTP 404, 419, 500, timeout, or unreachable):
-              // DO NOT DELETE! Keep the tap safely in SQLite stud_entry_tbl with is_synced = 0!
-              _localDb.saveTapEntry(scan.copyWith(
-                isSynced: false,
-                errorMessage: res.message ?? 'Pending sync',
-              ));
-              // Mark last failed sync attempt so we back off for 1 minute
-              _lastFailedOfflineSyncTime = DateTime.now();
-              // Only mark network icon offline if there was an actual physical connection loss
-              if (res.isConnectionFailure) {
-                ref.read(isOfflineProvider.notifier).setOffline(true);
-              }
-              break;
-            }
-          }
-        } finally {
-          _inFlightSyncUuids.remove(scan.uuid);
+    return TapSyncCoordinator.instance.runExclusiveOfflineSync(() async {
+      _isSyncingOfflineQueue = true;
+      try {
+        final pending = _localDb.unsyncedRecords
+            .where((s) =>
+                !_inFlightSyncUuids.contains(s.uuid) &&
+                !TapSyncCoordinator.instance.isUuidClaimedOrInFlight(s.uuid))
+            .toList();
+        if (pending.isEmpty) {
+          _lastFailedOfflineSyncTime = null;
+          return;
         }
+
+        // Renew Laravel session & XSRF-TOKEN cookie once upfront before flushing queued taps
+        // so expired sessions (e.g. after hours offline) don't fail or race on individual taps.
+        await _apiService.ensureSessionAndFetchLogo(forceRefresh: true);
+
+        for (final scan in pending) {
+          if (_inFlightSyncUuids.contains(scan.uuid) ||
+              TapSyncCoordinator.instance.isUuidClaimedOrInFlight(scan.uuid)) {
+            continue;
+          }
+          if (_localDb.isRecordSynced(scan.uuid)) continue;
+          _inFlightSyncUuids.add(scan.uuid);
+          TapSyncCoordinator.instance.claimUuid(scan.uuid);
+          try {
+            final res = await _apiService.sendRfidScan(scan);
+            if (res.isSuccess) {
+              // Mark record as synced in SQLite (even if tap_on_interval=1 on a retry,
+              // because the tap was already recorded on the server during a prior attempt!).
+              _localDb.markRecordSynced(scan.uuid, studentInfo: res.studentInfo);
+              ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
+
+              // Also cache the student's profile & download photo if returned during offline sync!
+              if (res.studentInfo != null) {
+                final effectiveBaseUrl = scan.branchCode.isNotEmpty
+                    ? EnvConfig.getBranchBaseUrl(scan.branchCode)
+                    : ApiConstants.defaultBaseUrl;
+                unawaited(
+                  _localDb.upsertStudentAndDownloadImage(
+                    rfidCode: scan.rfidCode,
+                    branchCode: scan.branchCode,
+                    onlineInfo: res.studentInfo!,
+                    baseUrl: effectiveBaseUrl,
+                    tapTime: scan.scannedAt,
+                  ),
+                );
+              }
+            } else {
+              if (res.isPermanentRejection) {
+                // True business rejection from ERP (e.g. "Unable to Process Transaction Code Not Found")
+                // ignore: avoid_print
+                print('[Kiosk Offline Sync] Remote rejected queued RFID ${scan.rfidCode} (${res.message}). Clearing out from local DB...');
+                _localDb.deleteTapEntry(scan.uuid);
+                _localDb.deleteStudentFromCache(scan.rfidCode);
+                ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
+              } else {
+                // Transient network or server error (HTTP 404, 419, 500, timeout, or unreachable):
+                // DO NOT DELETE! Keep the tap safely in SQLite stud_entry_tbl with is_synced = 0!
+                _localDb.saveTapEntry(scan.copyWith(
+                  isSynced: false,
+                  errorMessage: res.message ?? 'Pending sync',
+                ));
+                // Mark last failed sync attempt so we back off for 1 minute
+                _lastFailedOfflineSyncTime = DateTime.now();
+                // Only abort the remaining queue if the server is genuinely unreachable
+                if (res.isConnectionFailure) {
+                  final stillReachable = await _apiService.checkConnectivity();
+                  if (!stillReachable) {
+                    ref.read(isOfflineProvider.notifier).setOffline(true);
+                    break;
+                  }
+                }
+              }
+            }
+          } finally {
+            _inFlightSyncUuids.remove(scan.uuid);
+            TapSyncCoordinator.instance.releaseClaimedUuid(scan.uuid);
+          }
+        }
+        if (_localDb.unsyncedCount == 0) {
+          _lastFailedOfflineSyncTime = null;
+        }
+        ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
+      } finally {
+        _isSyncingOfflineQueue = false;
       }
-      if (_localDb.unsyncedCount == 0) {
-        _lastFailedOfflineSyncTime = null;
-      }
-      ref.read(offlineQueueCountProvider.notifier).setCount(_localDb.unsyncedCount);
-    } finally {
-      _isSyncingOfflineQueue = false;
-    }
+    });
   }
 }
 

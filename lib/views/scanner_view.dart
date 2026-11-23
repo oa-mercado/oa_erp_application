@@ -323,8 +323,8 @@ class _ScannerViewState extends ConsumerState<ScannerView> with WindowListener {
     }
 
     try {
-      await notifier.syncRosterFromServer();
       await notifier.syncOfflineQueue(force: true);
+      await notifier.syncRosterFromServer();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
